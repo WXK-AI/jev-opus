@@ -8,6 +8,8 @@
 npm install -g jev-opus && jev-opus init && jev-opus claude
 ```
 
+<p align="center"><img src="assets/demo.svg" width="860" alt="Effort switches medium → low → high → low inside one Claude Code prompt while the prompt cache keeps growing"></p>
+
 jev-opus runs Claude Code on `claude-opus-5-5`, either your normal interactive `claude` with an "Opus 5.5 · Jev" entry in `/model`, or a session it drives itself. The [TypeSafe Jev](https://typesafe.ai) System-1 reflex picks the effort level when a prompt arrives, then again after every tool batch, before Claude's next API call. Reading files runs at `low`. A failing test raises the next step to `high`. Once tests pass, it drops back down. All of this happens inside one prompt.
 
 ```
