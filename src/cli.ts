@@ -65,7 +65,7 @@ async function main(): Promise<void> {
     // Everything after `claude` belongs to Claude Code; routing bounds come from the config/env.
     const trace = createTrace(config.traceDir);
     const jev = new JevClient();
-    if (!jev.enabled) console.error(c.yellow('JEV_API_KEY not set — routing with local heuristics (run `jev-opus init`).'));
+    if (!jev.enabled) console.error(c.yellow('No Jev key (JEV_API_KEY or OPENROUTER_API_KEY) — routing with local heuristics (run `jev-opus init`).'));
     process.exitCode = await launchClaude(jev, { min: config.minEffort, max: config.maxEffort }, argv.slice(1), trace.write);
     return;
   }
@@ -116,7 +116,7 @@ async function main(): Promise<void> {
   }
 
   if (!router.usingJev && !pinned) {
-    console.log(c.yellow(values['no-jev'] ? 'Jev disabled — routing with local heuristics.' : 'JEV_API_KEY not set — routing with local heuristics.'));
+    console.log(c.yellow(values['no-jev'] ? 'Jev disabled — routing with local heuristics.' : 'No Jev key (JEV_API_KEY or OPENROUTER_API_KEY) — routing with local heuristics.'));
   }
 
   const permissionMode = (values.yolo ? 'bypassPermissions' : values['permission-mode'] ?? 'acceptEdits') as PermissionMode;
@@ -200,13 +200,14 @@ async function init(): Promise<void> {
   let key = process.env.JEV_API_KEY ?? '';
   if (!key && process.stdin.isTTY) {
     const t = new Terminal(false);
-    key = (await t.ask('TypeSafe Jev API key (apikey_…, empty to skip): ')).trim();
+    key = (await t.ask('Jev key: a TypeSafe key (apikey_…) or an OpenRouter key (sk-or-…), empty to skip: ')).trim();
     t.close();
   }
   fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   fs.writeFileSync(CONFIG_ENV_FILE, [
     '# jev-opus configuration',
-    `JEV_API_KEY=${key}`,
+    key.startsWith('sk-or-') ? `OPENROUTER_API_KEY=${key}\nJEV_PROVIDER=openrouter` : `JEV_API_KEY=${key}`,
+    '# or use Jev through OpenRouter: OPENROUTER_API_KEY=sk-or-… and JEV_PROVIDER=openrouter',
     '# JEV_BASE_URL=https://api.typesafe.ai/v1/systemone',
     '# JEV_MODEL=jev-latest',
     '',

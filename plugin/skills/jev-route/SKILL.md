@@ -10,11 +10,11 @@ allowed-tools: Bash
 This makes one Jev call and no Claude call:
 
 ```bash
-npx -y github:WXK-AI/jev-opus --route-only <<'JEV_TASK'
+npx -y jev-opus@latest --route-only <<'JEV_TASK'
 $ARGUMENTS
 JEV_TASK
 ```
 
 Report the task type, difficulty, stakes, the chosen effort, and the reasons line. If `$ARGUMENTS` is empty, ask the user which task to classify.
 
-If Jev isn't configured, the answer comes from local heuristics. Tell the user that, and mention `npx -y github:WXK-AI/jev-opus init`.
+If Jev isn't configured, the answer comes from local heuristics. Tell the user that, and mention `npx -y jev-opus@latest init`.

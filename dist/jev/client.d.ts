@@ -55,11 +55,15 @@ export declare class JevClient implements JevLike {
     failures: number;
     inputTokens: number;
     totalLatencyMs: number;
+    private readonly provider;
     constructor(opts?: {
         apiKey?: string;
         baseUrl?: string;
         model?: string;
+        provider?: 'typesafe' | 'openrouter';
     });
+    get providerName(): string;
+    private requestBody;
     get enabled(): boolean;
     get costUsd(): number;
     ask(state: string, questions: Record<string, JevQuestion>): Promise<JevResult>;

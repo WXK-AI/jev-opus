@@ -2,6 +2,12 @@
 
 **Claude Opus 5.5 with the effort level re-decided at every step, without breaking the prompt cache.**
 
+[![npm](https://img.shields.io/npm/v/jev-opus)](https://www.npmjs.com/package/jev-opus) [![ci](https://github.com/WXK-AI/jev-opus/actions/workflows/ci.yml/badge.svg)](https://github.com/WXK-AI/jev-opus/actions/workflows/ci.yml)
+
+```bash
+npm install -g jev-opus && jev-opus init && jev-opus claude
+```
+
 jev-opus runs Claude Code on `claude-opus-5-5`, either your normal interactive `claude` with an "Opus 5.5 · Jev" entry in `/model`, or a session it drives itself. The [TypeSafe Jev](https://typesafe.ai) System-1 reflex picks the effort level when a prompt arrives, then again after every tool batch, before Claude's next API call. Reading files runs at `low`. A failing test raises the next step to `high`. Once tests pass, it drops back down. All of this happens inside one prompt.
 
 ```
@@ -29,10 +35,10 @@ Normally, changing `effort` between requests changes the request prefix, which t
 Requirements:
 - Node ≥ 22.18
 - [Claude Code](https://code.claude.com) 2.1.280 or newer, logged in (`claude auth login`)
-- a TypeSafe Jev API key. Without one, jev-opus still works, using local heuristics.
+- a Jev key, either a [TypeSafe](https://typesafe.ai) key (`apikey_…`) or an [OpenRouter](https://openrouter.ai/keys) key (`sk-or-…`), which reaches the same Jev model through TypeSafe. Without one, jev-opus still works, using local heuristics.
 
 ```bash
-npm install -g https://github.com/WXK-AI/jev-opus/archive/refs/heads/main.tar.gz
+npm install -g jev-opus      # or run anything without installing: npx jev-opus …
 jev-opus init       # writes ~/.config/jev-opus/.env and asks for your Jev key
 jev-opus doctor     # checks Claude Code, your credential, Jev, and a real Opus 5.5 call
 ```
@@ -170,6 +176,8 @@ npm test                    # offline tests, including a scripted fake Claude Co
 npm run typecheck && npm run build
 npm run validate:plugin     # needs the claude CLI
 ```
+
+Releasing: bump `version` in `package.json` and `plugin/.claude-plugin/plugin.json`, then `npm run build`, commit, and push a matching tag (`git tag v0.3.0 && git push --tags`). The release workflow tests, publishes to npm with provenance, and creates the GitHub release.
 
 Inspired by [miuuyy/Astra-Ares](https://github.com/miuuyy/Astra-Ares), which brings Jev-chosen reasoning effort to Codex through a patched Codex build. jev-opus gets the same model-picker experience in Claude Code without patching it, through the supported gateway setup.
 

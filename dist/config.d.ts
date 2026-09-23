@@ -8,9 +8,13 @@ export declare const config: {
     maxEffort: import("@anthropic-ai/claude-agent-sdk").EffortLevel;
     traceDir: string;
     jev: {
+        provider: 'typesafe' | 'openrouter';
         apiKey: string;
+        openrouterKey: string;
         baseUrl: string;
         model: string;
+        openrouterUrl: string;
+        openrouterModel: string;
         timeoutMs: number;
         retries: number;
         inputPricePerMillion: number;

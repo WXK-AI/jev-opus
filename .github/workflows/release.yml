@@ -1,0 +1,27 @@
+name: release
+# Push a tag like v0.3.0 (matching package.json) to publish to npm and create a GitHub release.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write   # create the GitHub release
+  id-token: write   # npm trusted publishing (OIDC) + provenance
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run typecheck && npm test
+      - name: tag matches package.json
+        run: test "v$(node -p 'require(\"./package.json\").version')" = "${GITHUB_REF_NAME}"
+      - name: dist/ is up to date
+        run: npm run build && git diff --exit-code -- dist
+      - run: npm publish --provenance --access public
+      - run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -78,3 +78,26 @@ test('JevClient without a key is disabled and fails fast', async () => {
   const r = await jev.ask('s', TASK_QUESTIONS);
   assert.equal(r.failed, true);
 });
+
+test('JevClient via OpenRouter pins the TypeSafe provider', async () => {
+  let body: Record<string, unknown> = {};
+  const srv = await server((req, res) => {
+    let raw = '';
+    req.on('data', (d) => (raw += d));
+    req.on('end', () => {
+      body = JSON.parse(raw);
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ model: 'typesafe/jev-1.13', answers: { stuck: { noul: 0.9 } }, usage: { input_tokens: 5 } }));
+    });
+  });
+  try {
+    const jev = new JevClient({ provider: 'openrouter', apiKey: 'sk-or-test', baseUrl: srv.url, model: 'typesafe/jev-1.13' });
+    const r = await jev.ask('s', { stuck: STEP_QUESTIONS.stuck });
+    assert.equal(r.failed, false);
+    assert.equal(body.model, 'typesafe/jev-1.13');
+    assert.deepEqual(body.provider, { only: ['typesafe'], allow_fallbacks: false });
+    assert.equal(r.answers.stuck?.kind === 'noul' && r.answers.stuck.p, 0.9);
+  } finally {
+    srv.close();
+  }
+});

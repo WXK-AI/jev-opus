@@ -47,10 +47,23 @@ export class JevClient {
     failures = 0;
     inputTokens = 0;
     totalLatencyMs = 0;
+    provider;
     constructor(opts = {}) {
-        this.apiKey = opts.apiKey ?? config.jev.apiKey;
-        this.baseUrl = opts.baseUrl ?? config.jev.baseUrl;
-        this.model = opts.model ?? config.jev.model;
+        this.provider = opts.provider ?? config.jev.provider;
+        const or = this.provider === 'openrouter';
+        this.apiKey = opts.apiKey ?? (or ? config.jev.openrouterKey : config.jev.apiKey);
+        this.baseUrl = opts.baseUrl ?? (or ? config.jev.openrouterUrl : config.jev.baseUrl);
+        this.model = opts.model ?? (or ? config.jev.openrouterModel : config.jev.model);
+    }
+    get providerName() {
+        return this.provider;
+    }
+    requestBody(state, questions) {
+        const body = { state, model: this.model, questions };
+        // OpenRouter: pin the TypeSafe provider so no other model ever answers.
+        if (this.provider === 'openrouter')
+            body.provider = { only: ['typesafe'], allow_fallbacks: false };
+        return JSON.stringify(body);
     }
     get enabled() {
         return this.apiKey.length > 0;
@@ -61,7 +74,7 @@ export class JevClient {
     async ask(state, questions) {
         const start = Date.now();
         if (!this.enabled) {
-            return { answers: neutralAnswers(questions), failed: true, error: 'JEV_API_KEY not set', latencyMs: 0, inputTokens: 0 };
+            return { answers: neutralAnswers(questions), failed: true, error: this.provider === 'openrouter' ? 'OPENROUTER_API_KEY not set' : 'JEV_API_KEY not set', latencyMs: 0, inputTokens: 0 };
         }
         this.queries++;
         let lastError = 'request failed';
@@ -70,7 +83,7 @@ export class JevClient {
                 const res = await fetch(this.baseUrl, {
                     method: 'POST',
                     headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ state, model: this.model, questions }),
+                    body: this.requestBody(state, questions),
                     signal: AbortSignal.timeout(config.jev.timeoutMs),
                 });
                 if (res.status === 429 || res.status >= 500) {

@@ -26,9 +26,14 @@ export const config = {
     maxEffort: envEffort('JEV_OPUS_MAX_EFFORT', 'high'),
     traceDir: process.env.JEV_OPUS_TRACE_DIR || path.join(CONFIG_DIR, 'traces'),
     jev: {
+        // Jev directly from TypeSafe, or through OpenRouter (same answers, pay with OpenRouter credits).
+        provider: (process.env.JEV_PROVIDER || (!process.env.JEV_API_KEY && process.env.OPENROUTER_API_KEY ? 'openrouter' : 'typesafe')),
         apiKey: process.env.JEV_API_KEY || process.env.TYPESAFE_API_KEY || '',
+        openrouterKey: process.env.OPENROUTER_API_KEY || '',
         baseUrl: process.env.JEV_BASE_URL || 'https://api.typesafe.ai/v1/systemone',
         model: process.env.JEV_MODEL || 'jev-latest',
+        openrouterUrl: process.env.JEV_OPENROUTER_URL || 'https://openrouter.ai/api/alpha/decisions',
+        openrouterModel: process.env.JEV_OPENROUTER_MODEL || 'typesafe/jev-1.13',
         timeoutMs: 8_000,
         retries: 1,
         inputPricePerMillion: 0.042,
