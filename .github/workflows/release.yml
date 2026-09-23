@@ -18,7 +18,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck && npm test
       - name: tag matches package.json
-        run: test "v$(node -p 'require(\"./package.json\").version')" = "${GITHUB_REF_NAME}"
+        run: test "v$(npm pkg get version | tr -d '"')" = "${GITHUB_REF_NAME}"
       - name: dist/ is up to date
         run: npm run build && git diff --exit-code -- dist
       - name: publish to npm (skipped if this version is already published)
