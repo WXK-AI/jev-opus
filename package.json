@@ -41,7 +41,7 @@
   ],
   "scripts": {
     "start": "node src/cli.ts",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "validate:plugin": "claude plugin validate plugin && claude plugin validate .",
