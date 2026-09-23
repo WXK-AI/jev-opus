@@ -39,7 +39,8 @@ Requirements:
 - a TypeSafe Jev API key. Without one, jev-opus still works, using local heuristics.
 
 ```bash
-npm install -g github:WXK-AI/jev-opus   # or run without installing: npx -y github:WXK-AI/jev-opus …
+npm install -g https://github.com/WXK-AI/jev-opus/archive/refs/heads/main.tar.gz
+# or run without installing: npx -y github:WXK-AI/jev-opus …
 jev-opus init                           # writes ~/.config/jev-opus/.env and asks for your Jev key
 jev-opus doctor                         # checks Claude Code, your credential, Jev, and a real Opus 5.5 call
 ```
