@@ -10,7 +10,7 @@ import { config } from '../config.js';
  */
 const INHERITED = /^(ANTHROPIC_|CLAUDE|MCP_|OTEL_)/;
 const KEEP = new Set(['CLAUDE_CONFIG_DIR']);
-export function childEnv(base = process.env) {
+export function childEnv(base = process.env, opts = {}) {
     const env = {};
     for (const [k, v] of Object.entries(base)) {
         if (v === undefined)
@@ -36,7 +36,7 @@ export function childEnv(base = process.env) {
     if (c.baseUrl)
         env.ANTHROPIC_BASE_URL = c.baseUrl;
     // claude.ai connectors (Gmail, Drive, …) are noise for a delegated coding task; opt back in with JEV_OPUS_CLAUDEAI_CONNECTORS=1.
-    if (base.JEV_OPUS_CLAUDEAI_CONNECTORS !== '1')
+    if (!opts.connectors && base.JEV_OPUS_CLAUDEAI_CONNECTORS !== '1')
         env.ENABLE_CLAUDEAI_MCP_SERVERS = 'false';
     return { env, credential };
 }

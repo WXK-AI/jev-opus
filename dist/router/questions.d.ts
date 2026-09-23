@@ -25,7 +25,7 @@ export declare const PHASES: {
 };
 export type Phase = keyof typeof PHASES;
 export declare const DIFFICULTY_LABELS: readonly ['Trivial: can be answered or done instantly', 'Easy: routine for a competent engineer', 'Moderate: needs some care and a few steps', 'Hard: subtle, multi-step, easy to get wrong', 'Extreme: research-grade or deeply intricate'];
-export declare const TASK_SET_VERSION = "task.v1";
+export declare const TASK_SET_VERSION = "task.v2";
 export declare const TASK_QUESTIONS: {
     task_type: {
         type: "choice";
@@ -53,7 +53,7 @@ export declare const TASK_QUESTIONS: {
         instructions: string;
     };
 };
-export declare const STEP_SET_VERSION = "step.v1";
+export declare const STEP_SET_VERSION = "step.v2";
 export declare const STEP_QUESTIONS: {
     phase: {
         type: "choice";

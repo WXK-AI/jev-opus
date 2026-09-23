@@ -2,7 +2,7 @@
 
 **Claude Opus 5.5 with the effort level re-decided at every step, without breaking the prompt cache.**
 
-jev-opus drives Claude Code on `claude-opus-5-5`. The [TypeSafe Jev](https://typesafe.ai) System-1 reflex picks the effort level when a prompt arrives, then again after every tool batch, before Claude's next API call. Reading files runs at `low`. A failing test raises the next step to `high`. Once tests pass, it drops back down. All of this happens inside one prompt.
+jev-opus runs Claude Code on `claude-opus-5-5`, either your normal interactive `claude` with an "Opus 5.5 · Jev" entry in `/model`, or a session it drives itself. The [TypeSafe Jev](https://typesafe.ai) System-1 reflex picks the effort level when a prompt arrives, then again after every tool batch, before Claude's next API call. Reading files runs at `low`. A failing test raises the next step to `high`. Once tests pass, it drops back down. All of this happens inside one prompt.
 
 ```
 ◆ jev │ task debugging · difficulty 1.3/4 · stakes 0.43 → MEDIUM
@@ -19,51 +19,81 @@ jev-opus drives Claude Code on `claude-opus-5-5`. The [TypeSafe Jev](https://typ
 
 ## Why the cache survives
 
-Normally, changing `effort` between requests changes the request prefix, which throws away the prompt cache. jev-opus changes effort mid-session through Claude Code's `applyFlagSettings({ effortLevel })`. Claude Code sends that change as a **per-turn** effort statement, not a top-level parameter, so the cached history stays valid. The hook that makes the switch runs *before* Claude's next request, so each change applies to the very next call.
+Normally, changing `effort` between requests changes the request prefix, which throws away the prompt cache. Opus 5.5 also accepts effort as a **per-message statement** inside the conversation. jev-opus only ever changes effort that way, and it keeps every statement in place on later requests, so the history the model saw never changes. Two modes, same guarantee:
 
-```
-prompt ──► Jev: task type · difficulty · stakes ──► starting effort
-             │
-             ▼
-   Claude Code (claude-opus-5-5) ── tool batch ──► PostToolBatch hook
-             ▲                                        │  Jev: next phase ·
-             │        applyFlagSettings({effortLevel})│  step difficulty · stuck?
-             └──────────── effort for next call ◄─────┘
-```
+- **`jev-opus claude` (gateway):** your normal Claude Code → local gateway → Jev decides → effort statement inserted before the turn it governs → Anthropic API.
+- **`jev-opus "task"` (driver):** runs Claude Code headless via the Agent SDK. After each tool batch, a hook calls `applyFlagSettings({ effortLevel })`, which Claude Code sends as a per-turn statement.
 
 ## Install
 
 Requirements:
 - Node ≥ 22.18
-- [Claude Code](https://code.claude.com) 2.1.280 or newer, logged in (`claude auth login`), or an `ANTHROPIC_API_KEY`
+- [Claude Code](https://code.claude.com) 2.1.280 or newer, logged in (`claude auth login`)
 - a TypeSafe Jev API key. Without one, jev-opus still works, using local heuristics.
 
 ```bash
 npm install -g https://github.com/WXK-AI/jev-opus/archive/refs/heads/main.tar.gz
-# or run without installing: npx -y github:WXK-AI/jev-opus …
-jev-opus init                           # writes ~/.config/jev-opus/.env and asks for your Jev key
-jev-opus doctor                         # checks Claude Code, your credential, Jev, and a real Opus 5.5 call
+jev-opus init       # writes ~/.config/jev-opus/.env and asks for your Jev key
+jev-opus doctor     # checks Claude Code, your credential, Jev, and a real Opus 5.5 call
 ```
 
-## Use
+## Use it in your normal Claude Code: "Opus 5.5 · Jev" in `/model`
+
+```bash
+jev-opus claude                 # any `claude` arguments work: jev-opus claude -c, jev-opus claude -p "…"
+```
+
+This opens the regular interactive Claude Code, the same interface, tools and approvals. It adds a model entry, **Opus 5.5 · Jev**, and selects it for you. While that model is selected, Jev re-picks the effort before every API call. Pick any other model in `/model` and requests pass through untouched. The status line shows Jev's current choice:
+
+```
+◆ Jev low → HIGH · diagnosing
+```
+
+**How it works:** `jev-opus claude` starts a small local gateway and points Claude Code at it (`ANTHROPIC_BASE_URL`, an officially supported setup that keeps your claude.ai login). For each request on the Jev model, the gateway asks Jev and inserts a **per-message effort statement** at the turn it governs. It replays every earlier insertion byte-identically on later requests, so the cached prefix and preserved-thinking blocks stay valid. Verified live: effort went medium → low → high → high → low inside one prompt, while cache reads grew on every call (24.5k → 29.9k → 30.0k → 31.4k → 32.3k).
+
+- **Manual changes win.** Running `/effort` yourself pauses Jev until your next prompt.
+- **Subagents** are routed as their own threads.
+- **Short side requests without tools** (titles, summaries) are never routed.
+
+### Other Claude Code surfaces
+
+Start a long-running gateway, then point the surface at it:
+
+```bash
+jev-opus gateway                # http://127.0.0.1:47821, prints the env to use; decisions logged to ~/.config/jev-opus/gateway.log
+```
+
+| Surface | How | Works with a claude.ai subscription? |
+| --- | --- | --- |
+| Terminal `claude` | `jev-opus claude`, or export the printed env before `claude` | **Yes** (tested) |
+| VS Code extension | put the printed env in `claudeCode.environmentVariables` | Yes (same mechanism; not yet tested) |
+| JetBrains plugin, Agent SDK apps | set the printed env for the process | Yes (same mechanism; not yet tested) |
+| Claude desktop app, Code tab | The app ignores `ANTHROPIC_BASE_URL`. It only uses gateways in its "Claude Desktop on 3P" mode (Developer → Configure Third-Party Inference → Gateway), which replaces your claude.ai account with an **Anthropic API key**. | **No.** Use `jev-opus claude` in the app's terminal panel instead. |
+| claude.ai web, mobile, cloud sessions | not routable | No |
+
+`JEV_GATEWAY_DEBUG=1` logs each request's model and message layout (never credentials).
+
+## Or let jev-opus drive the whole session
 
 ```bash
 jev-opus "fix the failing date tests"            # one prompt in the current directory
-jev-opus                                          # interactive session: /pin high · /auto · /bounds low medium · /status
+jev-opus                                          # its own interactive session: /pin high · /auto · /bounds low medium · /status
 jev-opus --route-only "design our billing queue"  # see Jev's decision; no Claude call
 jev-opus -v -w ../repo "…"                        # routing reasons, every tool result, per-call effort + cache
 ```
 
+This mode runs Claude Code headless through the Agent SDK. It switches effort with `applyFlagSettings` from a hook that runs after every tool batch.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--min` / `--max` | `low` / `high` | effort range Jev may use. Pass `--max max` to allow `xhigh` and `max` |
+| `--min` / `--max` | `low` / `high` | effort range Jev may use. Pass `--max max` to allow `xhigh` and `max` (`JEV_OPUS_MIN_EFFORT` / `JEV_OPUS_MAX_EFFORT` for every mode) |
 | `--effort <level>` | none | pin one level; no routing |
 | `--no-jev` | off | local heuristics only |
 | `--permission-mode` | `acceptEdits` | anything not auto-allowed is asked for in the terminal; `--yolo` bypasses all prompts |
 | `--settings` | `project,local` | Claude Code settings sources to load; add `user` to load `~/.claude/settings.json` |
 | `--json` | off | full report: decisions, effort per API call, usage |
 
-Every run writes a JSONL trace to `~/.config/jev-opus/traces/` with every decision, plus the effort and cache usage of each API call.
+Every run writes a JSONL trace to `~/.config/jev-opus/traces/`.
 
 ## Claude Code plugin
 
@@ -74,18 +104,10 @@ The repo is also a plugin marketplace. In Claude Code (CLI or desktop app):
 /plugin install jev-opus@jev-opus
 ```
 
-This adds two skills:
-
-- `/jev-opus:jev <task>` hands the task to a jev-opus run in the current project and reports back the result, the effort path and the cache stats.
+- `/jev-opus:jev <task>` hands the task to a Jev-steered Opus 5.5 run and reports back the result, the effort path and the cache stats. This works inside any chat, desktop app included.
 - `/jev-opus:jev-route <task>` shows the effort Jev would pick, and why.
 
-## Does it work in the Claude desktop app?
-
-| Where | Works? |
-| --- | --- |
-| `jev-opus` in any terminal, including the desktop app's terminal panel | **Yes.** It is the full thing. |
-| The plugin's `/jev-opus:jev` inside a desktop-app or CLI chat | **Yes.** It hands the task off to a jev-opus run, and Jev steers *that* run's effort. |
-| Jev steering the effort of **the chat you are typing in** | **No.** Claude Code hooks cannot set effort, and the desktop app refuses to let a session change its own effort by design. jev-opus avoids both limits by owning the session it drives. |
+A plugin can't retune the chat it runs in. Claude Code hooks can't set effort, and the desktop app refuses to let a session change its own effort. For that, use `jev-opus claude`.
 
 ## How the effort is chosen
 
@@ -149,4 +171,6 @@ npm run typecheck && npm run build
 npm run validate:plugin     # needs the claude CLI
 ```
 
-MIT © WXK-AI. Not affiliated with Anthropic or TypeSafe.
+Inspired by [miuuyy/Astra-Ares](https://github.com/miuuyy/Astra-Ares), which brings Jev-chosen reasoning effort to Codex through a patched Codex build. jev-opus gets the same model-picker experience in Claude Code without patching it, through the supported gateway setup.
+
+MIT © WXK-AI. Not affiliated with Anthropic, TypeSafe, or Astra-Ares.

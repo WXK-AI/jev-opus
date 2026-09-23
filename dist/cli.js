@@ -9,6 +9,7 @@ import { CONFIG_DIR, CONFIG_ENV_FILE, PROJECT_ROOT, config } from './config.js';
 import { EFFORT_LEVELS, isEffort } from './effort.js';
 import { JevClient } from './jev/client.js';
 import { EffortRouter } from './router/router.js';
+import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, statusline } from './gateway/launch.js';
 import { createTrace } from './trace.js';
 import { c, fmtEffort, formatDecision, formatReport, Terminal } from './ui.js';
 const HELP = `jev-opus — Claude Opus 5.5 (via Claude Code) with effort steered turn-by-turn by Jev
@@ -19,6 +20,10 @@ Usage:
   jev-opus --route-only "p"    show Jev's effort decision for a prompt without calling Claude
   jev-opus doctor              check Claude Code, credentials, and the Jev API
   jev-opus init                create ${CONFIG_ENV_FILE} (asks for your Jev key)
+
+  jev-opus claude [args…]      your normal interactive Claude Code, with "Opus 5.5 · Jev" selected in /model
+  jev-opus gateway [--port n]  run the Jev gateway for VS Code / JetBrains / Agent SDK (ANTHROPIC_BASE_URL)
+  jev-opus statusline          Claude Code statusLine command showing Jev's current effort
 
 Options:
   -w, --workspace <dir>        directory Claude works in (default: current directory)
@@ -52,6 +57,18 @@ async function readStdin() {
     return Buffer.concat(chunks).toString('utf8');
 }
 async function main() {
+    const argv = process.argv.slice(2);
+    if (argv[0] === 'claude') {
+        // Everything after `claude` belongs to Claude Code; routing bounds come from the config/env.
+        const trace = createTrace(config.traceDir);
+        const jev = new JevClient();
+        if (!jev.enabled)
+            console.error(c.yellow('JEV_API_KEY not set — routing with local heuristics (run `jev-opus init`).'));
+        process.exitCode = await launchClaude(jev, { min: config.minEffort, max: config.maxEffort }, argv.slice(1), trace.write);
+        return;
+    }
+    if (argv[0] === 'statusline')
+        return statusline();
     const { values, positionals } = parseArgs({
         allowPositionals: true,
         options: {
@@ -70,6 +87,7 @@ async function main() {
             'route-only': { type: 'boolean' },
             help: { type: 'boolean', short: 'h' },
             version: { type: 'boolean' },
+            port: { type: 'string' },
         },
     });
     if (values.help)
@@ -85,6 +103,8 @@ async function main() {
     const terminal = new Terminal(values.verbose ?? false);
     if (positionals[0] === 'doctor')
         return doctor(router, jev, values.model ?? config.model, values.settings);
+    if (positionals[0] === 'gateway')
+        return gateway(jev, bounds, Number(values.port ?? 47821));
     let prompt = positionals.join(' ').trim();
     if (!prompt && !process.stdin.isTTY)
         prompt = (await readStdin()).trim();
@@ -149,6 +169,19 @@ async function main() {
         if (values.verbose)
             console.log(c.dim(`trace: ${trace.file}`));
     }
+}
+async function gateway(jev, bounds, port) {
+    const trace = createTrace(config.traceDir);
+    const gw = createGateway(jev && jev.enabled ? jev : null, bounds, { port, echo: true, trace: trace.write });
+    const url = await gw.listen();
+    const env = gatewayClientEnv(url);
+    console.log(`Jev gateway on ${url} · effort ${bounds.min}..${bounds.max} · ${jev?.enabled ? 'Jev' : 'heuristics'} · log ${GATEWAY_LOG}`);
+    console.log(c.dim('Point Claude Code at it (CLI shell, VS Code "claudeCode.environmentVariables", Agent SDK env):'));
+    for (const [k, v] of Object.entries(env))
+        console.log(c.dim(`  ${k}=${v}`));
+    console.log(c.dim(`then pick "Opus 5.5 · Jev" in /model (or --model ${JEV_MODEL_ID}). Ctrl-C to stop.`));
+    await new Promise((resolve) => process.once('SIGINT', resolve));
+    await gw.close();
 }
 function packageVersion() {
     try {

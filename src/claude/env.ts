@@ -17,7 +17,7 @@ export interface ChildEnv {
   credential: string;
 }
 
-export function childEnv(base: NodeJS.ProcessEnv = process.env): ChildEnv {
+export function childEnv(base: NodeJS.ProcessEnv = process.env, opts: { connectors?: boolean } = {}): ChildEnv {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
     if (v === undefined) continue;
@@ -39,6 +39,6 @@ export function childEnv(base: NodeJS.ProcessEnv = process.env): ChildEnv {
   }
   if (c.baseUrl) env.ANTHROPIC_BASE_URL = c.baseUrl;
   // claude.ai connectors (Gmail, Drive, …) are noise for a delegated coding task; opt back in with JEV_OPUS_CLAUDEAI_CONNECTORS=1.
-  if (base.JEV_OPUS_CLAUDEAI_CONNECTORS !== '1') env.ENABLE_CLAUDEAI_MCP_SERVERS = 'false';
+  if (!opts.connectors && base.JEV_OPUS_CLAUDEAI_CONNECTORS !== '1') env.ENABLE_CLAUDEAI_MCP_SERVERS = 'false';
   return { env, credential };
 }
