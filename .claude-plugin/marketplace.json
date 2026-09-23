@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "jev-opus",
+  "owner": { "name": "WXK-AI" },
+  "description": "jev-opus: Claude Opus 5.5 with per-step effort routing by TypeSafe Jev",
+  "plugins": [
+    {
+      "name": "jev-opus",
+      "source": "./plugin",
+      "description": "Hand tasks to Claude Opus 5.5 with the effort level re-picked every step by the TypeSafe Jev reflex, cache-safe"
+    }
+  ]
+}

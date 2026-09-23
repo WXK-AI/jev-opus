@@ -1,0 +1,12 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "jev-opus",
+  "version": "0.1.0",
+  "description": "Hand tasks to Claude Opus 5.5 with the effort level re-picked every step by the TypeSafe Jev reflex, cache-safe",
+  "author": { "name": "WXK-AI" },
+  "homepage": "https://github.com/WXK-AI/jev-opus",
+  "repository": "https://github.com/WXK-AI/jev-opus",
+  "license": "MIT",
+  "keywords": ["effort", "opus", "jev", "routing", "prompt-caching"],
+  "skills": ["./skills/"]
+}

@@ -1,0 +1,60 @@
+{
+  "name": "jev-opus",
+  "version": "0.1.0",
+  "description": "Claude Opus 5.5 via Claude Code with the effort level re-decided every step by the TypeSafe Jev System-1 reflex — without breaking the prompt cache",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "opus",
+    "effort",
+    "agent",
+    "jev",
+    "typesafe",
+    "prompt-caching",
+    "claude-code-plugin"
+  ],
+  "license": "MIT",
+  "author": "WXK-AI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WXK-AI/jev-opus.git"
+  },
+  "homepage": "https://github.com/WXK-AI/jev-opus#readme",
+  "bugs": {
+    "url": "https://github.com/WXK-AI/jev-opus/issues"
+  },
+  "type": "module",
+  "bin": {
+    "jev-opus": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "scripts": {
+    "start": "node src/cli.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "validate:plugin": "claude plugin validate plugin && claude plugin validate ."
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.280"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2"
+  }
+}
