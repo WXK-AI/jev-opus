@@ -42,10 +42,10 @@
   "scripts": {
     "start": "node src/cli.ts",
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "prepare": "npm run build",
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "validate:plugin": "claude plugin validate plugin && claude plugin validate ."
+    "validate:plugin": "claude plugin validate plugin && claude plugin validate .",
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=22.18.0"

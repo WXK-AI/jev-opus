@@ -18,4 +18,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: dist/ is committed and up to date
+        run: npm run build && git diff --exit-code -- dist
       - run: node dist/cli.js --version
