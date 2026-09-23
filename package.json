@@ -25,7 +25,7 @@
   },
   "type": "module",
   "bin": {
-    "jev-opus": "./dist/cli.js"
+    "jev-opus": "dist/cli.js"
   },
   "exports": {
     ".": {
