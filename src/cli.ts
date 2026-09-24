@@ -101,7 +101,9 @@ async function main(): Promise<void> {
   const pinned = values.effort ? effortArg('effort', values.effort, 'medium') : null;
   const jev = values['no-jev'] ? null : new JevClient();
   const router = new EffortRouter({ jev, bounds, pinned });
-  const terminal = new Terminal(values.verbose ?? false);
+  const terminal = new Terminal(values.verbose ?? false, values.json ?? false);
+  // --json: stdout carries only the JSON report; every notice goes to stderr.
+  const notice = values.json ? console.error : console.log;
 
   if (positionals[0] === 'doctor') return doctor(router, jev, values.model ?? config.model, values.settings);
   if (positionals[0] === 'gateway') return gateway(jev, bounds, Number(values.port ?? 47821));
@@ -112,12 +114,12 @@ async function main(): Promise<void> {
   if (values['route-only']) {
     if (!prompt) throw new Error('--route-only needs a prompt');
     const d = await router.routeTask(prompt, null);
-    console.log(formatDecision(d, true));
+    console.log(values.json ? JSON.stringify(d, null, 2) : formatDecision(d, true));
     return;
   }
 
   if (!router.usingJev && !pinned) {
-    console.log(c.yellow(values['no-jev'] ? 'Jev disabled — routing with local heuristics.' : 'No Jev key (JEV_API_KEY or OPENROUTER_API_KEY) — routing with local heuristics.'));
+    notice(c.yellow(values['no-jev'] ? 'Jev disabled — routing with local heuristics.' : 'No Jev key (JEV_API_KEY or OPENROUTER_API_KEY) — routing with local heuristics.'));
   }
 
   const permissionMode = (values.yolo ? 'bypassPermissions' : values['permission-mode'] ?? 'acceptEdits') as PermissionMode;
@@ -141,15 +143,17 @@ async function main(): Promise<void> {
     trace: trace.write,
   });
 
-  console.log(c.dim(`workspace ${cwd} · effort ${bounds.min}..${bounds.max}${pinned ? ` · pinned ${pinned}` : ''} · auth: ${credential}`));
+  notice(c.dim(`workspace ${cwd} · effort ${bounds.min}..${bounds.max}${pinned ? ` · pinned ${pinned}` : ''} · auth: ${credential}`));
 
   const run = async (p: string): Promise<TaskReport | null> => {
+    const jevBefore = jev?.costUsd ?? 0;
     try {
       const report = await session.send(p);
-      if (values.json) console.log(JSON.stringify(report, null, 2));
+      const jevCostUsd = (jev?.costUsd ?? 0) - jevBefore; // jev.costUsd is cumulative — the task's share is the delta
+      if (values.json) console.log(JSON.stringify({ ...report, jevCostUsd }, null, 2));
       else {
         if (report.isError) console.log(c.red(report.result));
-        console.log(formatReport(report, jev?.costUsd ?? 0));
+        console.log(formatReport(report, jevCostUsd));
       }
       return report;
     } catch (err) {
@@ -164,11 +168,11 @@ async function main(): Promise<void> {
       process.exitCode = report && !report.isError ? 0 : 1;
       return;
     }
-    await repl(session, router, terminal, run);
+    await repl(session, router, terminal, run, notice);
   } finally {
     terminal.close();
     await session.close();
-    if (values.verbose) console.log(c.dim(`trace: ${trace.file}`));
+    if (values.verbose) notice(c.dim(`trace: ${trace.file}`));
   }
 }
 
@@ -231,34 +235,35 @@ async function repl(
   router: EffortRouter,
   terminal: Terminal,
   run: (p: string) => Promise<TaskReport | null>,
+  notice: (s: string) => void,
 ): Promise<void> {
-  console.log(c.dim('Type a prompt. /pin <effort> · /auto · /bounds <min> <max> · /status · /exit'));
+  notice(c.dim('Type a prompt. /pin <effort> · /auto · /bounds <min> <max> · /status · /exit'));
   for (;;) {
     const line = (await terminal.ask(c.bold('\n› '))).trim();
     if (!line) continue;
     if (line === '/exit' || line === '/quit') return;
     if (line.startsWith('/pin')) {
       const e = line.split(/\s+/)[1];
-      if (!isEffort(e)) { console.log(`usage: /pin ${EFFORT_LEVELS.join('|')}`); continue; }
+      if (!isEffort(e)) { notice(`usage: /pin ${EFFORT_LEVELS.join('|')}`); continue; }
       await session.setPinned(e);
-      console.log(`effort pinned at ${fmtEffort(e)}`);
+      notice(`effort pinned at ${fmtEffort(e)}`);
       continue;
     }
     if (line === '/auto') {
       await session.setPinned(null);
-      console.log(`Jev routing ${router.usingJev ? 'on' : 'on (heuristics)'}`);
+      notice(`Jev routing ${router.usingJev ? 'on' : 'on (heuristics)'}`);
       continue;
     }
     if (line.startsWith('/bounds')) {
       const [, lo, hi] = line.split(/\s+/);
-      if (!isEffort(lo) || !isEffort(hi)) { console.log('usage: /bounds <min> <max>'); continue; }
+      if (!isEffort(lo) || !isEffort(hi)) { notice('usage: /bounds <min> <max>'); continue; }
       router.bounds = { min: lo, max: hi };
-      console.log(`effort bounds ${lo}..${hi}`);
+      notice(`effort bounds ${lo}..${hi}`);
       continue;
     }
     if (line === '/status') {
       const cur = session.currentEffort;
-      console.log(`effort ${cur ? fmtEffort(cur) : '—'} · bounds ${router.bounds.min}..${router.bounds.max} · ${router.pinned ? `pinned ${router.pinned}` : router.usingJev ? 'Jev routing' : 'heuristic routing'}`);
+      notice(`effort ${cur ? fmtEffort(cur) : '—'} · bounds ${router.bounds.min}..${router.bounds.max} · ${router.pinned ? `pinned ${router.pinned}` : router.usingJev ? 'Jev routing' : 'heuristic routing'}`);
       continue;
     }
     await run(line);

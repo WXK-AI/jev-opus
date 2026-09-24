@@ -18,7 +18,13 @@ import { describeToolInput, looksFailed, stringifyResult } from './describe.ts';
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
 
 export interface ApiCallInfo {
-  effort: Effort;
+  /** effort the router decided should govern this call */
+  requested: Effort;
+  /** the requested level was confirmed applied (start option, or applyFlagSettings resolved) */
+  applied: boolean;
+  /** effort Claude Code reported for the turn through our hooks, when available */
+  observed?: string;
+  /** latest usage seen for this message id — streamed blocks carry non-final usage */
   inputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
@@ -35,19 +41,42 @@ export interface SessionObserver {
   onNotice?(message: string): void;
 }
 
+export interface UsageTotals {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+}
+
+/**
+ * One prompt's outcome. `costUsd` and `usage` are this task's share: deltas of
+ * the session's cumulative result counters (`total_cost_usd`, `modelUsage`
+ * summed across models — which includes subagent and helper calls), while
+ * `calls`/`callEfforts` cover only main-thread API calls we observed.
+ * `scope` labels that coverage and `sessionTotals` carries the raw counters.
+ */
 export interface TaskReport {
   result: string;
   isError: boolean;
   subtype: string;
+  /** this task's spend: delta of the session's cumulative total_cost_usd */
   costUsd: number;
   turns: number;
   durationMs: number;
   decisions: EffortDecision[];
-  /** effort level used for each API call of this prompt, in order */
+  /** requested effort for each main-thread API call of this prompt, in order */
   callEfforts: Effort[];
   /** effort levels Claude Code itself reported to our hooks */
   observedEfforts: string[];
-  usage: { input: number; cacheRead: number; cacheWrite: number; output: number };
+  /** per-call records for this prompt's main-thread API calls (subagent traffic excluded) */
+  calls: ApiCallInfo[];
+  /** this task's token usage — coverage is labelled by scope.tokens */
+  usage: UsageTotals;
+  scope: { costUsd: 'task-delta'; tokens: 'task-delta' | 'main-thread-calls' };
+  /** cumulative session counters carried by this result */
+  sessionTotals: { costUsd: number; usage: UsageTotals };
+  /** a cumulative counter moved backwards (new epoch — deltas are the new totals) */
+  counterReset: boolean;
 }
 
 export interface SessionOptions {
@@ -104,9 +133,10 @@ interface TaskState {
   trajectory: string[];
   failures: Map<string, string>;
   decisions: EffortDecision[];
-  callEfforts: Effort[];
+  /** main-thread API calls of this task, keyed by message id — later blocks refresh usage */
+  calls: Map<string, ApiCallInfo>;
+  lastCall: ApiCallInfo | null;
   observedEfforts: string[];
-  usage: TaskReport['usage'];
   resolve: (r: TaskReport) => void;
   reject: (e: Error) => void;
 }
@@ -118,12 +148,19 @@ export class JevOpusSession {
   private readonly input = new InputQueue();
   private q: Query | null = null;
   private pump: Promise<void> | null = null;
+  /** latest effort the router decided (requested) */
   private effort: Effort | null = null;
+  /** latest effort confirmed pushed to Claude Code (start option or resolved applyFlagSettings) */
+  private appliedEffort: Effort | null = null;
   private task: TaskState | null = null;
-  private seenMessageIds = new Set<string>();
   private toolNames = new Map<string, string>();
   private lastResult = '';
   private ended: Error | null = null;
+  /** cumulative session counters carried by the last result — task numbers are deltas of these */
+  private lastTotals: { costUsd: number; tokens: UsageTotals } = {
+    costUsd: 0,
+    tokens: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+  };
 
   constructor(opts: SessionOptions) {
     this.opts = opts;
@@ -143,9 +180,12 @@ export class JevOpusSession {
     observer?.onDecision?.(decision);
     this.opts.trace?.({ event: 'decision', ...decision });
 
-    if (!this.q) this.start(decision.effort);
-    else if (decision.effort !== this.effort) await this.q.applyFlagSettings({ effortLevel: decision.effort });
     this.effort = decision.effort;
+    if (!this.q) this.start(decision.effort);
+    else if (decision.effort !== this.appliedEffort) {
+      await this.q.applyFlagSettings({ effortLevel: decision.effort });
+      this.appliedEffort = decision.effort;
+    }
 
     const done = new Promise<TaskReport>((resolve, reject) => {
       this.task = {
@@ -157,9 +197,9 @@ export class JevOpusSession {
         trajectory: [],
         failures: new Map(),
         decisions: [decision],
-        callEfforts: [],
+        calls: new Map(),
+        lastCall: null,
         observedEfforts: [],
-        usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
         resolve,
         reject,
       };
@@ -171,9 +211,11 @@ export class JevOpusSession {
   /** Pin/unpin effort mid-session (REPL /pin, /auto). Applies immediately. */
   async setPinned(effort: Effort | null): Promise<void> {
     this.opts.router.pinned = effort;
-    if (effort && this.q && effort !== this.effort) {
+    if (!effort || !this.q) return;
+    this.effort = effort;
+    if (effort !== this.appliedEffort) {
       await this.q.applyFlagSettings({ effortLevel: effort });
-      this.effort = effort;
+      this.appliedEffort = effort;
     }
   }
 
@@ -216,6 +258,7 @@ export class JevOpusSession {
       },
     };
     this.q = (o.queryFn ?? sdkQuery)({ prompt: this.input, options });
+    this.appliedEffort = initialEffort; // the start option is applied by definition
     this.pump = this.consume(this.q);
   }
 
@@ -240,27 +283,32 @@ export class JevOpusSession {
       return;
     }
     if (m.type === 'assistant') {
-      if (m.parent_tool_use_id !== null || !t) return; // subagent traffic isn't routed
+      if (m.parent_tool_use_id !== null || !t) return; // subagent traffic isn't routed; modelUsage deltas still count its spend
       const msg = m.message;
-      if (!this.seenMessageIds.has(msg.id)) {
-        this.seenMessageIds.add(msg.id);
-        const effort = this.effort ?? 'medium';
-        const u = msg.usage;
-        const info: ApiCallInfo = {
-          effort,
-          inputTokens: u.input_tokens ?? 0,
-          cacheReadTokens: u.cache_read_input_tokens ?? 0,
-          cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
-          outputTokens: u.output_tokens ?? 0,
+      const u = msg.usage;
+      // Assistant messages are block-level: several can share message.id and their
+      // usage is not final until the last block, so keep the latest seen per id.
+      let info = t.calls.get(msg.id);
+      const fresh = !info;
+      if (!info) {
+        const requested = this.effort ?? 'medium';
+        info = {
+          requested,
+          applied: this.appliedEffort === requested,
+          inputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          outputTokens: 0,
         };
-        t.callEfforts.push(effort);
-        t.usage.input += info.inputTokens;
-        t.usage.cacheRead += info.cacheReadTokens;
-        t.usage.cacheWrite += info.cacheWriteTokens;
-        t.usage.output += info.outputTokens;
-        o.observer?.onApiCall?.(info);
-        o.trace?.({ event: 'api_call', ...info });
+        t.calls.set(msg.id, info);
+        t.lastCall = info;
       }
+      info.inputTokens = u?.input_tokens ?? info.inputTokens;
+      info.cacheReadTokens = u?.cache_read_input_tokens ?? info.cacheReadTokens;
+      info.cacheWriteTokens = u?.cache_creation_input_tokens ?? info.cacheWriteTokens;
+      info.outputTokens = u?.output_tokens ?? info.outputTokens;
+      if (fresh) o.observer?.onApiCall?.(info);
+      o.trace?.({ event: 'api_call', messageId: msg.id, ...info });
       for (const block of msg.content) {
         if (block.type === 'text' && block.text.trim()) {
           t.assistantNote = block.text;
@@ -290,19 +338,81 @@ export class JevOpusSession {
       this.task = null;
       const result = m.subtype === 'success' ? m.result : (m.errors?.join('; ') || m.subtype);
       this.lastResult = `User asked: ${clip(t.prompt, 300)}\nAgent answered: ${clip(result, 500)}`;
+
+      // total_cost_usd and modelUsage are cumulative across this streaming-input
+      // session, and modelUsage spans the whole query pipeline (main loop,
+      // subagents, sidechains, helpers) — so task numbers are deltas between results.
+      let counterReset = false;
+      const delta = (total: number, previous: number): number => {
+        if (total < previous) {
+          counterReset = true; // a new epoch (e.g. /clear) — take the new value as the delta
+          return total;
+        }
+        return total - previous;
+      };
+
+      const modelUsage = m.modelUsage && typeof m.modelUsage === 'object' ? m.modelUsage : null;
+      let modelCost = 0;
+      const tokenTotals = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+      if (modelUsage) {
+        for (const u of Object.values(modelUsage)) {
+          if (!u || typeof u !== 'object') continue;
+          tokenTotals.input += u.inputTokens ?? 0;
+          tokenTotals.output += u.outputTokens ?? 0;
+          tokenTotals.cacheRead += u.cacheReadInputTokens ?? 0;
+          tokenTotals.cacheWrite += u.cacheCreationInputTokens ?? 0;
+          modelCost += u.costUSD ?? 0;
+        }
+      }
+      const costTotal = typeof m.total_cost_usd === 'number' ? m.total_cost_usd : modelCost;
+      const costUsd = delta(costTotal, this.lastTotals.costUsd);
+      this.lastTotals.costUsd = costTotal;
+
+      const calls = [...t.calls.values()];
+      let usage: UsageTotals;
+      let tokens: TaskReport['scope']['tokens'];
+      if (modelUsage) {
+        usage = {
+          input: delta(tokenTotals.input, this.lastTotals.tokens.input),
+          cacheRead: delta(tokenTotals.cacheRead, this.lastTotals.tokens.cacheRead),
+          cacheWrite: delta(tokenTotals.cacheWrite, this.lastTotals.tokens.cacheWrite),
+          output: delta(tokenTotals.output, this.lastTotals.tokens.output),
+        };
+        this.lastTotals.tokens = tokenTotals;
+        tokens = 'task-delta';
+      } else {
+        // no pipeline-wide counters: only the calls observed on the main thread
+        usage = {
+          input: calls.reduce((n, c) => n + c.inputTokens, 0),
+          cacheRead: calls.reduce((n, c) => n + c.cacheReadTokens, 0),
+          cacheWrite: calls.reduce((n, c) => n + c.cacheWriteTokens, 0),
+          output: calls.reduce((n, c) => n + c.outputTokens, 0),
+        };
+        tokens = 'main-thread-calls';
+      }
+
       const report: TaskReport = {
         result,
         isError: m.is_error,
         subtype: m.subtype,
-        costUsd: m.total_cost_usd,
+        costUsd,
         turns: m.num_turns,
         durationMs: m.duration_ms,
         decisions: t.decisions,
-        callEfforts: t.callEfforts,
+        callEfforts: calls.map((c) => c.requested),
         observedEfforts: t.observedEfforts,
-        usage: t.usage,
+        calls,
+        usage,
+        scope: { costUsd: 'task-delta', tokens },
+        sessionTotals: { costUsd: costTotal, usage: { ...this.lastTotals.tokens } },
+        counterReset,
       };
-      o.trace?.({ event: 'result', subtype: m.subtype, costUsd: report.costUsd, turns: report.turns, usage: report.usage, callEfforts: report.callEfforts });
+      if (counterReset) o.observer?.onNotice?.('Claude Code session counters reset — task cost/tokens are the new epoch totals');
+      o.trace?.({
+        event: 'result', subtype: m.subtype, costUsd: report.costUsd, sessionCostUsd: costTotal,
+        turns: report.turns, usage: report.usage, scope: report.scope, counterReset,
+        callEfforts: report.callEfforts, calls: report.calls,
+      });
       t.resolve(report);
     }
   }
@@ -321,6 +431,7 @@ export class JevOpusSession {
     const observed = input.effort?.level;
     if (observed) {
       t.observedEfforts.push(observed);
+      if (t.lastCall) t.lastCall.observed = observed;
       if (this.effort && observed !== this.effort) {
         observer?.onNotice?.(`Claude Code ran that turn at ${observed}, expected ${this.effort}`);
       }
@@ -351,12 +462,13 @@ export class JevOpusSession {
     });
     t.trajectory.push(`step ${t.turn} @${current}: ${batch.map((c) => `${c.tool} ${clip(c.summary, 60)} ${c.failed ? 'FAILED' : 'ok'}`).join('; ')}`);
 
-    if (decision.changed) {
-      await this.q.applyFlagSettings({ effortLevel: decision.effort });
-      this.effort = decision.effort;
-    }
+    this.effort = decision.effort;
     t.decisions.push(decision);
     observer?.onDecision?.(decision);
     this.opts.trace?.({ event: 'decision', turn: t.turn, ...decision });
+    if (decision.effort !== this.appliedEffort) {
+      await this.q.applyFlagSettings({ effortLevel: decision.effort });
+      this.appliedEffort = decision.effort;
+    }
   }
 }

@@ -36,12 +36,19 @@ export class JevOpusSession {
     input = new InputQueue();
     q = null;
     pump = null;
+    /** latest effort the router decided (requested) */
     effort = null;
+    /** latest effort confirmed pushed to Claude Code (start option or resolved applyFlagSettings) */
+    appliedEffort = null;
     task = null;
-    seenMessageIds = new Set();
     toolNames = new Map();
     lastResult = '';
     ended = null;
+    /** cumulative session counters carried by the last result — task numbers are deltas of these */
+    lastTotals = {
+        costUsd: 0,
+        tokens: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+    };
     constructor(opts) {
         this.opts = opts;
     }
@@ -58,11 +65,13 @@ export class JevOpusSession {
         const decision = await router.routeTask(prompt, this.effort, this.lastResult || undefined);
         observer?.onDecision?.(decision);
         this.opts.trace?.({ event: 'decision', ...decision });
+        this.effort = decision.effort;
         if (!this.q)
             this.start(decision.effort);
-        else if (decision.effort !== this.effort)
+        else if (decision.effort !== this.appliedEffort) {
             await this.q.applyFlagSettings({ effortLevel: decision.effort });
-        this.effort = decision.effort;
+            this.appliedEffort = decision.effort;
+        }
         const done = new Promise((resolve, reject) => {
             this.task = {
                 prompt,
@@ -73,9 +82,9 @@ export class JevOpusSession {
                 trajectory: [],
                 failures: new Map(),
                 decisions: [decision],
-                callEfforts: [],
+                calls: new Map(),
+                lastCall: null,
                 observedEfforts: [],
-                usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
                 resolve,
                 reject,
             };
@@ -86,9 +95,12 @@ export class JevOpusSession {
     /** Pin/unpin effort mid-session (REPL /pin, /auto). Applies immediately. */
     async setPinned(effort) {
         this.opts.router.pinned = effort;
-        if (effort && this.q && effort !== this.effort) {
+        if (!effort || !this.q)
+            return;
+        this.effort = effort;
+        if (effort !== this.appliedEffort) {
             await this.q.applyFlagSettings({ effortLevel: effort });
-            this.effort = effort;
+            this.appliedEffort = effort;
         }
     }
     async close() {
@@ -130,6 +142,7 @@ export class JevOpusSession {
             },
         };
         this.q = (o.queryFn ?? sdkQuery)({ prompt: this.input, options });
+        this.appliedEffort = initialEffort; // the start option is applied by definition
         this.pump = this.consume(this.q);
     }
     async consume(q) {
@@ -156,27 +169,33 @@ export class JevOpusSession {
         }
         if (m.type === 'assistant') {
             if (m.parent_tool_use_id !== null || !t)
-                return; // subagent traffic isn't routed
+                return; // subagent traffic isn't routed; modelUsage deltas still count its spend
             const msg = m.message;
-            if (!this.seenMessageIds.has(msg.id)) {
-                this.seenMessageIds.add(msg.id);
-                const effort = this.effort ?? 'medium';
-                const u = msg.usage;
-                const info = {
-                    effort,
-                    inputTokens: u.input_tokens ?? 0,
-                    cacheReadTokens: u.cache_read_input_tokens ?? 0,
-                    cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
-                    outputTokens: u.output_tokens ?? 0,
+            const u = msg.usage;
+            // Assistant messages are block-level: several can share message.id and their
+            // usage is not final until the last block, so keep the latest seen per id.
+            let info = t.calls.get(msg.id);
+            const fresh = !info;
+            if (!info) {
+                const requested = this.effort ?? 'medium';
+                info = {
+                    requested,
+                    applied: this.appliedEffort === requested,
+                    inputTokens: 0,
+                    cacheReadTokens: 0,
+                    cacheWriteTokens: 0,
+                    outputTokens: 0,
                 };
-                t.callEfforts.push(effort);
-                t.usage.input += info.inputTokens;
-                t.usage.cacheRead += info.cacheReadTokens;
-                t.usage.cacheWrite += info.cacheWriteTokens;
-                t.usage.output += info.outputTokens;
-                o.observer?.onApiCall?.(info);
-                o.trace?.({ event: 'api_call', ...info });
+                t.calls.set(msg.id, info);
+                t.lastCall = info;
             }
+            info.inputTokens = u?.input_tokens ?? info.inputTokens;
+            info.cacheReadTokens = u?.cache_read_input_tokens ?? info.cacheReadTokens;
+            info.cacheWriteTokens = u?.cache_creation_input_tokens ?? info.cacheWriteTokens;
+            info.outputTokens = u?.output_tokens ?? info.outputTokens;
+            if (fresh)
+                o.observer?.onApiCall?.(info);
+            o.trace?.({ event: 'api_call', messageId: msg.id, ...info });
             for (const block of msg.content) {
                 if (block.type === 'text' && block.text.trim()) {
                     t.assistantNote = block.text;
@@ -211,19 +230,80 @@ export class JevOpusSession {
             this.task = null;
             const result = m.subtype === 'success' ? m.result : (m.errors?.join('; ') || m.subtype);
             this.lastResult = `User asked: ${clip(t.prompt, 300)}\nAgent answered: ${clip(result, 500)}`;
+            // total_cost_usd and modelUsage are cumulative across this streaming-input
+            // session, and modelUsage spans the whole query pipeline (main loop,
+            // subagents, sidechains, helpers) — so task numbers are deltas between results.
+            let counterReset = false;
+            const delta = (total, previous) => {
+                if (total < previous) {
+                    counterReset = true; // a new epoch (e.g. /clear) — take the new value as the delta
+                    return total;
+                }
+                return total - previous;
+            };
+            const modelUsage = m.modelUsage && typeof m.modelUsage === 'object' ? m.modelUsage : null;
+            let modelCost = 0;
+            const tokenTotals = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+            if (modelUsage) {
+                for (const u of Object.values(modelUsage)) {
+                    if (!u || typeof u !== 'object')
+                        continue;
+                    tokenTotals.input += u.inputTokens ?? 0;
+                    tokenTotals.output += u.outputTokens ?? 0;
+                    tokenTotals.cacheRead += u.cacheReadInputTokens ?? 0;
+                    tokenTotals.cacheWrite += u.cacheCreationInputTokens ?? 0;
+                    modelCost += u.costUSD ?? 0;
+                }
+            }
+            const costTotal = typeof m.total_cost_usd === 'number' ? m.total_cost_usd : modelCost;
+            const costUsd = delta(costTotal, this.lastTotals.costUsd);
+            this.lastTotals.costUsd = costTotal;
+            const calls = [...t.calls.values()];
+            let usage;
+            let tokens;
+            if (modelUsage) {
+                usage = {
+                    input: delta(tokenTotals.input, this.lastTotals.tokens.input),
+                    cacheRead: delta(tokenTotals.cacheRead, this.lastTotals.tokens.cacheRead),
+                    cacheWrite: delta(tokenTotals.cacheWrite, this.lastTotals.tokens.cacheWrite),
+                    output: delta(tokenTotals.output, this.lastTotals.tokens.output),
+                };
+                this.lastTotals.tokens = tokenTotals;
+                tokens = 'task-delta';
+            }
+            else {
+                // no pipeline-wide counters: only the calls observed on the main thread
+                usage = {
+                    input: calls.reduce((n, c) => n + c.inputTokens, 0),
+                    cacheRead: calls.reduce((n, c) => n + c.cacheReadTokens, 0),
+                    cacheWrite: calls.reduce((n, c) => n + c.cacheWriteTokens, 0),
+                    output: calls.reduce((n, c) => n + c.outputTokens, 0),
+                };
+                tokens = 'main-thread-calls';
+            }
             const report = {
                 result,
                 isError: m.is_error,
                 subtype: m.subtype,
-                costUsd: m.total_cost_usd,
+                costUsd,
                 turns: m.num_turns,
                 durationMs: m.duration_ms,
                 decisions: t.decisions,
-                callEfforts: t.callEfforts,
+                callEfforts: calls.map((c) => c.requested),
                 observedEfforts: t.observedEfforts,
-                usage: t.usage,
+                calls,
+                usage,
+                scope: { costUsd: 'task-delta', tokens },
+                sessionTotals: { costUsd: costTotal, usage: { ...this.lastTotals.tokens } },
+                counterReset,
             };
-            o.trace?.({ event: 'result', subtype: m.subtype, costUsd: report.costUsd, turns: report.turns, usage: report.usage, callEfforts: report.callEfforts });
+            if (counterReset)
+                o.observer?.onNotice?.('Claude Code session counters reset — task cost/tokens are the new epoch totals');
+            o.trace?.({
+                event: 'result', subtype: m.subtype, costUsd: report.costUsd, sessionCostUsd: costTotal,
+                turns: report.turns, usage: report.usage, scope: report.scope, counterReset,
+                callEfforts: report.callEfforts, calls: report.calls,
+            });
             t.resolve(report);
         }
     }
@@ -241,6 +321,8 @@ export class JevOpusSession {
         const observed = input.effort?.level;
         if (observed) {
             t.observedEfforts.push(observed);
+            if (t.lastCall)
+                t.lastCall.observed = observed;
             if (this.effort && observed !== this.effort) {
                 observer?.onNotice?.(`Claude Code ran that turn at ${observed}, expected ${this.effort}`);
             }
@@ -268,12 +350,13 @@ export class JevOpusSession {
             trajectory: t.trajectory,
         });
         t.trajectory.push(`step ${t.turn} @${current}: ${batch.map((c) => `${c.tool} ${clip(c.summary, 60)} ${c.failed ? 'FAILED' : 'ok'}`).join('; ')}`);
-        if (decision.changed) {
-            await this.q.applyFlagSettings({ effortLevel: decision.effort });
-            this.effort = decision.effort;
-        }
+        this.effort = decision.effort;
         t.decisions.push(decision);
         observer?.onDecision?.(decision);
         this.opts.trace?.({ event: 'decision', turn: t.turn, ...decision });
+        if (decision.effort !== this.appliedEffort) {
+            await this.q.applyFlagSettings({ effortLevel: decision.effort });
+            this.appliedEffort = decision.effort;
+        }
     }
 }

@@ -51,21 +51,29 @@ export function formatReport(r, jevCostUsd) {
     const totalIn = r.usage.input + r.usage.cacheRead + r.usage.cacheWrite;
     const hit = totalIn > 0 ? Math.round((100 * r.usage.cacheRead) / totalIn) : 0;
     const changes = r.decisions.filter((d) => d.changed && d.previous !== null).length;
+    const tokenScope = r.scope.tokens === 'task-delta' ? 'task delta, all pipeline models incl. subagents' : 'task, main-thread calls only';
+    const reset = r.counterReset ? c.yellow(' · session counters reset — deltas are the new epoch totals') : '';
     return [
         c.dim('─'.repeat(60)),
-        `${r.isError ? c.red('✗ ' + r.subtype) : c.green('✓ done')} in ${(r.durationMs / 1000).toFixed(1)}s · ${r.callEfforts.length} API calls · ${r.turns} turns · $${r.costUsd.toFixed(4)} Claude + $${jevCostUsd.toFixed(5)} Jev`,
+        `${r.isError ? c.red('✗ ' + r.subtype) : c.green('✓ done')} in ${(r.durationMs / 1000).toFixed(1)}s · ${r.calls.length} main-thread API calls · ${r.turns} turns`,
+        `  task cost $${r.costUsd.toFixed(4)} Claude + $${jevCostUsd.toFixed(5)} Jev · session total $${r.sessionTotals.costUsd.toFixed(4)}${reset}`,
         `  effort path: ${effortPath(r.callEfforts) || '—'}  ${c.dim(`(${changes} mid-prompt change${changes === 1 ? '' : 's'})`)}`,
-        `  cache: ${hit}% of input from cache ${c.dim(`(read ${k(r.usage.cacheRead)} · write ${k(r.usage.cacheWrite)} · uncached ${k(r.usage.input)} · out ${k(r.usage.output)})`)}`,
+        `  cache: ${hit}% of input from cache ${c.dim(`(read ${k(r.usage.cacheRead)} · write ${k(r.usage.cacheWrite)} · uncached ${k(r.usage.input)} · out ${k(r.usage.output)} · ${tokenScope})`)}`,
     ].join('\n');
 }
 export class Terminal {
     rl = null;
     verbose;
-    constructor(verbose) {
+    /** route all chatter to stderr so --json keeps stdout machine-readable */
+    toStderr;
+    out;
+    constructor(verbose, toStderr = false) {
         this.verbose = verbose;
+        this.toStderr = toStderr;
+        this.out = toStderr ? console.error : console.log;
     }
     get iface() {
-        this.rl ??= readline.createInterface({ input: process.stdin, output: process.stdout });
+        this.rl ??= readline.createInterface({ input: process.stdin, output: this.toStderr ? process.stderr : process.stdout });
         return this.rl;
     }
     ask(question) {
@@ -77,22 +85,23 @@ export class Terminal {
     }
     observer() {
         return {
-            onInit: ({ model, claudeVersion }) => console.log(c.dim(`claude code ${claudeVersion ?? '?'} · model ${model}`)),
-            onDecision: (d) => console.log(formatDecision(d, this.verbose)),
-            onAssistantText: (text) => console.log(`\n${text.trim()}\n`),
-            onToolUse: (tool, summary) => console.log(`${c.blue('  ▸')} ${c.bold(tool)} ${c.dim(summary)}`),
+            onInit: ({ model, claudeVersion }) => this.out(c.dim(`claude code ${claudeVersion ?? '?'} · model ${model}`)),
+            onDecision: (d) => this.out(formatDecision(d, this.verbose)),
+            onAssistantText: (text) => this.out(`\n${text.trim()}\n`),
+            onToolUse: (tool, summary) => this.out(`${c.blue('  ▸')} ${c.bold(tool)} ${c.dim(summary)}`),
             onToolResult: (_tool, failed, preview) => {
                 if (failed)
-                    console.log(`    ${c.red('✗')} ${c.dim(preview)}`);
+                    this.out(`    ${c.red('✗')} ${c.dim(preview)}`);
                 else if (this.verbose)
-                    console.log(`    ${c.green('✓')} ${c.dim(preview)}`);
+                    this.out(`    ${c.green('✓')} ${c.dim(preview)}`);
             },
             onApiCall: (i) => {
                 if (this.verbose) {
-                    console.log(c.dim(`    · api call @${i.effort} · cache read ${k(i.cacheReadTokens)} · write ${k(i.cacheWriteTokens)} · uncached ${k(i.inputTokens)} · out ${k(i.outputTokens)}`));
+                    const unconfirmed = i.applied ? '' : ' (requested, not confirmed applied)';
+                    this.out(c.dim(`    · api call @${i.requested}${unconfirmed} · cache read ${k(i.cacheReadTokens)} · write ${k(i.cacheWriteTokens)} · uncached ${k(i.inputTokens)} · out ${k(i.outputTokens)}`));
                 }
             },
-            onNotice: (m) => console.log(c.yellow(`  ! ${m}`)),
+            onNotice: (m) => this.out(c.yellow(`  ! ${m}`)),
         };
     }
     /** Interactive approval for tools the permission mode doesn't auto-allow. */

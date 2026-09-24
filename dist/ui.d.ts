@@ -20,7 +20,10 @@ export declare function formatReport(r: TaskReport, jevCostUsd: number): string;
 export declare class Terminal {
     private rl;
     verbose: boolean;
-    constructor(verbose: boolean);
+    /** route all chatter to stderr so --json keeps stdout machine-readable */
+    private readonly toStderr;
+    private readonly out;
+    constructor(verbose: boolean, toStderr?: boolean);
     private get iface();
     ask(question: string): Promise<string>;
     close(): void;
