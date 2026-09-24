@@ -1,6 +1,6 @@
 {
   "name": "jev-opus",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Claude Opus 5.5 via Claude Code with the effort level re-decided every step by the TypeSafe Jev System-1 reflex — without breaking the prompt cache",
   "keywords": [
     "claude",
