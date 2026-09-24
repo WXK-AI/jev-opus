@@ -11,10 +11,12 @@ import type { ToolCallSummary } from './types.ts';
  * snapshot it and restore the common-ancestor state after a rewind.
  */
 export interface Issue {
-    /** stable identity: normalized error text + command/test */
+    /** stable identity: hash of normalized error text + command/test (never raw text, it is persisted) */
     fingerprint: string;
-    /** command/test identity; a later pass with the same key clears the issue */
+    /** hash of the command/test identity; a later pass with the same key clears the issue */
     command: string;
+    /** readable command, in memory only for the Jev prompt; never serialized */
+    label?: string;
     /** failure is an environment blocker (network, permissions, missing infra…) */
     environment: boolean;
     /** batches in which this fingerprint has been observed failing */
@@ -52,6 +54,11 @@ export declare function emptyCore(): CoreState;
 export declare function commandKey(call: ToolCallSummary): string;
 /** Strip volatile content (numbers, paths, timestamps, ANSI) so the same error fingerprints identically. */
 export declare function normalizeError(text: string): string;
+/**
+ * Identities are hashed: router snapshots are journaled to disk, and commands
+ * or tool output can contain file contents or secrets.
+ */
+export declare function identity(text: string): string;
 /** Stable failure fingerprint: the command/test plus its normalized error text. */
 export declare function fingerprint(call: ToolCallSummary): string;
 export declare function isEnvironmentFailure(call: ToolCallSummary): boolean;

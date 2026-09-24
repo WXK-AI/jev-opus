@@ -408,3 +408,17 @@ test('commandKey ignores output plumbing so a piped rerun clears the same issue'
   assert.equal(k('npm test > /dev/null 2>&1'), k('npm test'));
   assert.notEqual(k('npm run lint'), k('npm test'));
 });
+
+test('router snapshots hold hashes only: no command text or tool output', async () => {
+  const { EffortRouter } = await import('../src/router/router.ts');
+  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
+  const task = await r.routeTask('fix the date tests', null);
+  await r.routeStep({
+    prompt: 'fix the date tests', profile: task.profile!, turn: 1, current: task.effort, consecutiveFailures: 1,
+    assistantNote: '', trajectory: [],
+    lastBatch: [{ tool: 'Bash', summary: 'curl -H "Authorization: Bearer SECRET123" https://x && npm test', failed: true, result: 'FAIL secret-file-contents Exit code 1' }],
+  });
+  const snap = JSON.stringify(r.snapshot());
+  assert.ok(snap.includes('"issues":[{'), 'the issue is tracked');
+  for (const leak of ['SECRET123', 'curl', 'npm test', 'secret-file-contents', 'Bash:']) assert.ok(!snap.includes(leak), `snapshot leaks ${leak}`);
+});

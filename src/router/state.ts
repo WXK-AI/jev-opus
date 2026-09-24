@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isEffort, type Effort } from '../effort.ts';
 import type { ToolCallSummary } from './types.ts';
 
@@ -13,10 +14,12 @@ import type { ToolCallSummary } from './types.ts';
  */
 
 export interface Issue {
-  /** stable identity: normalized error text + command/test */
+  /** stable identity: hash of normalized error text + command/test (never raw text, it is persisted) */
   fingerprint: string;
-  /** command/test identity; a later pass with the same key clears the issue */
+  /** hash of the command/test identity; a later pass with the same key clears the issue */
   command: string;
+  /** readable command, in memory only for the Jev prompt; never serialized */
+  label?: string;
   /** failure is an environment blocker (network, permissions, missing infra…) */
   environment: boolean;
   /** batches in which this fingerprint has been observed failing */
@@ -84,6 +87,14 @@ export function normalizeError(text: string): string {
   return s.replace(/\s+/g, ' ').trim().slice(0, 200);
 }
 
+/**
+ * Identities are hashed: router snapshots are journaled to disk, and commands
+ * or tool output can contain file contents or secrets.
+ */
+export function identity(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 20);
+}
+
 /** Stable failure fingerprint: the command/test plus its normalized error text. */
 export function fingerprint(call: ToolCallSummary): string {
   return `${commandKey(call)}|${normalizeError(call.result)}`;
@@ -133,12 +144,13 @@ export function reduceBatch(
   const cleared = new Set<Issue>();
 
   for (const call of batch) {
-    const command = commandKey(call);
+    const readable = commandKey(call);
+    const command = identity(readable);
     if (call.failed) {
       outcome.failedCalls++;
       const environment = isEnvironmentFailure(call);
       if (environment) outcome.environmentFailures++;
-      const fp = fingerprint(call);
+      const fp = identity(fingerprint(call));
       let issue = issues.find((i) => i.fingerprint === fp && !cleared.has(i));
       if (issue) {
         issue.attempts++;
@@ -146,7 +158,7 @@ export function reduceBatch(
         if (!issue.tried.includes(effort)) issue.tried.push(effort);
         if (!outcome.repeated.includes(issue)) outcome.repeated.push(issue);
       } else {
-        issue = { fingerprint: fp, command, environment, attempts: 1, tried: [effort], lastSeen: clock };
+        issue = { fingerprint: fp, command, label: readable.slice(0, 80), environment, attempts: 1, tried: [effort], lastSeen: clock };
         issues.push(issue);
         outcome.newIssues.push(issue);
       }
@@ -169,7 +181,8 @@ export function reduceBatch(
 
 /** The serializable part of the reducer state. */
 export function serializeCore(s: CoreState): { clock: number; issues: Issue[] } {
-  return { clock: s.clock, issues: s.issues };
+  // Drop the readable label: the snapshot is persisted and must hold hashes only.
+  return { clock: s.clock, issues: s.issues.map(({ label: _label, ...rest }) => rest) };
 }
 
 /** Tolerant restore: invalid issues are dropped, a missing/garbage payload yields null. */

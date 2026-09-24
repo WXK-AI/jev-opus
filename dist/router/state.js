@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isEffort } from '../effort.js';
 export function emptyCore() {
     return { clock: 0, issues: [], last: null };
@@ -26,6 +27,13 @@ export function normalizeError(text) {
     s = s.replace(/\b\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(z|utc|am|pm|[+-]\d{2}:?\d{2})?\b/g, ' ');
     s = s.replace(/\b\d+(\.\d+)?\b/g, ' ');
     return s.replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+/**
+ * Identities are hashed: router snapshots are journaled to disk, and commands
+ * or tool output can contain file contents or secrets.
+ */
+export function identity(text) {
+    return createHash('sha256').update(text).digest('hex').slice(0, 20);
 }
 /** Stable failure fingerprint: the command/test plus its normalized error text. */
 export function fingerprint(call) {
@@ -67,13 +75,14 @@ export function reduceBatch(state, batch, effort) {
     };
     const cleared = new Set();
     for (const call of batch) {
-        const command = commandKey(call);
+        const readable = commandKey(call);
+        const command = identity(readable);
         if (call.failed) {
             outcome.failedCalls++;
             const environment = isEnvironmentFailure(call);
             if (environment)
                 outcome.environmentFailures++;
-            const fp = fingerprint(call);
+            const fp = identity(fingerprint(call));
             let issue = issues.find((i) => i.fingerprint === fp && !cleared.has(i));
             if (issue) {
                 issue.attempts++;
@@ -84,7 +93,7 @@ export function reduceBatch(state, batch, effort) {
                     outcome.repeated.push(issue);
             }
             else {
-                issue = { fingerprint: fp, command, environment, attempts: 1, tried: [effort], lastSeen: clock };
+                issue = { fingerprint: fp, command, label: readable.slice(0, 80), environment, attempts: 1, tried: [effort], lastSeen: clock };
                 issues.push(issue);
                 outcome.newIssues.push(issue);
             }
@@ -106,7 +115,8 @@ export function reduceBatch(state, batch, effort) {
 }
 /** The serializable part of the reducer state. */
 export function serializeCore(s) {
-    return { clock: s.clock, issues: s.issues };
+    // Drop the readable label: the snapshot is persisted and must hold hashes only.
+    return { clock: s.clock, issues: s.issues.map(({ label: _label, ...rest }) => rest) };
 }
 /** Tolerant restore: invalid issues are dropped, a missing/garbage payload yields null. */
 export function reviveCore(raw) {

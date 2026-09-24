@@ -22,6 +22,7 @@ export function formatDecision(d: EffortDecision, verbose: boolean): string {
   const tag = c.magenta('◆ jev');
   const src = d.source === 'jev' ? c.dim(`(jev ${d.jevLatencyMs}ms)`)
     : d.source === 'pinned' ? c.dim('(pinned)')
+      : d.source === 'local' ? c.dim('(local: no Jev call needed)')
       : c.dim(`(heuristic${d.jevError ? `: ${d.jevError}` : ''})`);
   let what: string;
   if (d.kind === 'task' && d.profile) {
