@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="860" height="430" viewBox="0 0 860 430" role="img" aria-label="jev-opus demo: effort changes from medium to low to high to low inside one Claude Code prompt while the prompt cache keeps growing">
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="430" viewBox="0 0 860 430" role="img" aria-label="jev-opus demo: effort changes from medium to high and back to medium inside one Claude Code prompt while the prompt cache keeps growing">
   <style>
     .bg { fill: #0d1117; }
     .bar { fill: #161b22; }
@@ -24,16 +24,16 @@
   <text x="20" y="60" class="line" style="animation-delay:0s">› fix the failing date tests</text>
   <text x="20" y="92" class="line" style="animation-delay:1s"><tspan class="jev">◆ jev</tspan> task debugging · difficulty 1.3/4          → <tspan class="med">MEDIUM</tspan></text>
   <text x="20" y="120" class="line" style="animation-delay:2s"><tspan class="tool">  ▸ Read</tspan> <tspan class="dim">dates.js</tspan></text>
-  <text x="20" y="148" class="line" style="animation-delay:3s"><tspan class="jev">◆ jev</tspan> next: exploring · step 0.9/4          → <tspan class="med">MEDIUM</tspan> ⇒ <tspan class="low">LOW</tspan></text>
+  <text x="20" y="148" class="line" style="animation-delay:3s"><tspan class="jev">◆ jev</tspan> next: exploring                        → <tspan class="dim">stays medium</tspan></text>
   <text x="20" y="176" class="line" style="animation-delay:4.5s"><tspan class="tool">  ▸ Bash</tspan> <tspan class="dim">npm test</tspan>   <tspan class="fail">✗ 3 failing</tspan></text>
-  <text x="20" y="204" class="line" style="animation-delay:5.5s"><tspan class="jev">◆ jev</tspan> next: diagnosing · step 1.6/4         → <tspan class="low">LOW</tspan> ⇒ <tspan class="high">HIGH</tspan></text>
+  <text x="20" y="204" class="line" style="animation-delay:5.5s"><tspan class="jev">◆ jev</tspan> failing checks                         → <tspan class="med">MEDIUM</tspan> ⇒ <tspan class="high">HIGH</tspan></text>
   <text x="20" y="232" class="line" style="animation-delay:7s"><tspan class="tool">  ▸ Edit</tspan> <tspan class="dim">dates.js  (400-year rule, 1-based months)</tspan></text>
   <text x="20" y="260" class="line" style="animation-delay:8s"><tspan class="tool">  ▸ Bash</tspan> <tspan class="dim">npm test</tspan>   <tspan class="ok">✓ 3 pass</tspan></text>
-  <text x="20" y="288" class="line" style="animation-delay:9s"><tspan class="jev">◆ jev</tspan> next: finishing · step 0.0/4          → <tspan class="high">HIGH</tspan> ⇒ <tspan class="low">LOW</tspan></text>
+  <text x="20" y="288" class="line" style="animation-delay:9s"><tspan class="jev">◆ jev</tspan> matching checks passed                 → <tspan class="high">HIGH</tspan> ⇒ <tspan class="med">MEDIUM</tspan></text>
   <text x="20" y="326" class="line" style="animation-delay:10.5s"><tspan class="ok">✓</tspan> fixed both bugs · all 3 tests pass</text>
   <text x="20" y="354" class="line dim" style="animation-delay:11.5s">  cache reads per call: 24.5k → 29.9k → 30.0k → 31.4k → 32.3k   (never reset)</text>
 
   <rect x="0" y="392" width="860" height="38" class="bar"/>
   <text x="20" y="416" class="dim">status line:</text>
-  <text x="130" y="416" class="line" style="animation-delay:9s"><tspan class="jev">◆ Jev</tspan> high → <tspan class="low">LOW</tspan> · finishing</text>
+  <text x="130" y="416" class="line" style="animation-delay:9s"><tspan class="jev">◆ Jev ·</tspan> medium → high → <tspan class="med">MEDIUM</tspan> · verifying</text>
 </svg>

@@ -8,21 +8,19 @@
 npm install -g jev-opus && jev-opus init && jev-opus claude
 ```
 
-<p align="center"><img src="assets/demo.svg" width="860" alt="Effort switches medium → low → high → low inside one Claude Code prompt while the prompt cache keeps growing"></p>
+<p align="center"><img src="assets/demo.svg" width="860" alt="Effort switches medium → high → medium inside one Claude Code prompt while the prompt cache keeps growing"></p>
 
-jev-opus runs Claude Code on `claude-opus-5-5`, either your normal interactive `claude` with an "Opus 5.5 · Jev" entry in `/model`, or a session it drives itself. The [TypeSafe Jev](https://typesafe.ai) System-1 reflex picks the effort level when a prompt arrives, then again after every tool batch, before Claude's next API call. Reading files runs at `low`. A failing test raises the next step to `high`. Once tests pass, it drops back down. All of this happens inside one prompt.
+jev-opus runs Claude Code on `claude-opus-5-5`, either your normal interactive `claude` with an "Opus 5.5 · Jev" entry in `/model`, or a session it drives itself. The [TypeSafe Jev](https://typesafe.ai) System-1 reflex picks the effort level when a prompt arrives, then again after every tool batch, before Claude's next API call. A failing test raises the next step's effort. Once the same check passes, it steps back down. All of this happens inside one prompt.
+
+A real run in Claude Code 2.1.281, fixing two bugs in a date library (`jev-opus audit` output):
 
 ```
-◆ jev │ task debugging · difficulty 1.3/4 · stakes 0.43 → MEDIUM
-  ▸ Bash cat dates.js …
-◆ jev │ next: exploring · step 1.1/4 · stuck 0.07    → MEDIUM ⇒ LOW
-  ▸ Bash npm test …
-◆ jev │ next: diagnosing · step 1.1/4 · stuck 0.09   → LOW ⇒ HIGH
-  ▸ Bash sed -i … dates.js
-◆ jev │ next: verifying · step 0.8/4 · stuck 0.06    → stays high (holding after escalation)
-✓ done in 16.4s · 4 API calls · $0.1229 Claude + $0.00014 Jev
-  effort path: medium → low → high×2  (2 mid-prompt changes)
-  cache: 84% of input from cache — reads grew every call: 8.1k → 14.0k → 17.2k → 18.7k
+D-fda4d1c7 · MEDIUM · 1 attempts (completed) · 808 observed output tokens
+  difficulty 1.1/4 → low; debugging floor medium
+D-aeab8b84 · MEDIUM → HIGH · 1 attempts (completed) · 381 observed output tokens
+  failing checks → recovery effort; diagnosing → +1
+D-b73cb943 · HIGH → MEDIUM · 1 attempts (completed) · 175 observed output tokens
+  failing check now passes → release hold; verifying → -1
 ```
 
 ## Why the cache survives
@@ -85,7 +83,7 @@ Display options, set before the command or in `~/.config/jev-opus/.env`:
 
 - **Manual changes win.** Running `/effort` yourself pauses Jev until your next prompt.
 - **Subagents** are routed as their own threads.
-- **Short side requests without tools** (titles, summaries) are never routed.
+- **Side requests are never routed:** short requests without tools (titles, summaries), and Claude Code's next-prompt suggestion, which reuses the conversation. Their prefix still carries the inserted statements, so they share the cache.
 
 ### Other Claude Code surfaces
 
@@ -188,7 +186,9 @@ The owner-only JSONL files in `~/.config/jev-opus/journal/` are the durable sour
 
 A response is completed only after protocol completion. In-stream errors are failed; streams ending without completion are unknown. Usage coverage is tracked separately. Very large non-streaming JSON bodies that exceed the telemetry parser's 1 MiB bound are forwarded unchanged but marked unknown; streamed content is parsed incrementally.
 
-Prepared decisions and dispatch records are flushed before forwarding. If these writes fail, the request is not sent. Later audit write failures produce a visible degraded-logging notice; they cannot undo an already sent request. A corrupt recovery journal blocks replay rather than silently inventing replacement history. Keep the JSONL files intact when exporting or backing them up.
+The prepared decision, which holds the statements the request needs, is flushed to disk before forwarding. If that write fails, the request is not sent. Later records (dispatch, completion, annotations) are telemetry: if they fail to write, a visible degraded-logging notice appears, and they never block a request.
+
+A partial last line, which a crash during a write can leave, is skipped when the journal is read. Corruption anywhere else stops replay for that conversation with an explicit error, rather than silently inventing replacement history. Keep the JSONL files intact when exporting or backing them up.
 
 ## Credentials and isolation
 
@@ -226,7 +226,12 @@ npm run typecheck && npm run build
 npm run validate:plugin     # needs the claude CLI
 ```
 
-Releasing: bump `version` in `package.json` and `plugin/.claude-plugin/plugin.json`, then `npm run build`, commit, and push a matching tag (`git tag v0.3.0 && git push --tags`). The release workflow tests, publishes to npm with provenance, and creates the GitHub release.
+Releasing:
+1. Bump `version` in `package.json` and `plugin/.claude-plugin/plugin.json`, run `npm run build`, then commit and push.
+2. Run `npm publish --access public`; npm asks for two-factor approval in the browser.
+3. Push a matching tag once npm shows the version: `git tag v0.4.1 && git push origin v0.4.1`.
+
+The release workflow runs the tests, skips publishing when the version is already on npm, and creates the GitHub release. With npm trusted publishing configured for `release.yml`, step 2 can be dropped: the workflow then publishes itself, with provenance.
 
 Inspired by [miuuyy/Astra-Ares](https://github.com/miuuyy/Astra-Ares), which brings Jev-chosen reasoning effort to Codex through a patched Codex build. jev-opus gets the same model-picker experience in Claude Code without patching it, through the supported gateway setup.
 
