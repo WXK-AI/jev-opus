@@ -48,3 +48,29 @@ export function withGatewaySettings(args: readonly string[], additions: Pick<Set
   else out[index + 1] = json;
   return out;
 }
+
+/**
+ * Effort changes mostly happen on tool-only steps, where Claude writes no text
+ * and so no clean badge can render. One short line before each tool call gives
+ * every step a message for the badge to sit on, and doubles as a readable
+ * progress narration. It's short so Opus 5.5 keeps it as visible text, not a
+ * progress-update thinking block.
+ */
+export const NARRATION_PROMPT =
+  'Before each tool call, write one short sentence (under 15 words) saying what you are about to do. Keep it to a single line.';
+
+/** Append the narration instruction to the caller's --append-system-prompt, or add one. */
+export function withNarration(args: readonly string[], prompt = NARRATION_PROMPT): string[] {
+  const out = [...args];
+  for (let i = 0; i < out.length && out[i] !== '--'; i++) {
+    if (out[i] === '--append-system-prompt' && out[i + 1] !== undefined) {
+      out[i + 1] = `${out[i + 1]}\n\n${prompt}`;
+      return out;
+    }
+    if (out[i]!.startsWith('--append-system-prompt=')) {
+      out[i] = `${out[i]}\n\n${prompt}`;
+      return out;
+    }
+  }
+  return ['--append-system-prompt', prompt, ...out];
+}

@@ -16,3 +16,11 @@ export declare function createGateway(jev: JevLike | null, bounds: Bounds, opts?
 export declare function launchClaude(jev: JevLike | null, bounds: Bounds, claudeArgs: string[], trace?: (e: Record<string, unknown>) => void): Promise<number>;
 /** Claude Code statusLine command: shows the effort Jev picked for this session. */
 export declare function statusline(): Promise<void>;
+/** "◆ Jev · MEDIUM → HIGH → MEDIUM · verifying": the current prompt's whole path, newest last. */
+export declare function formatStatusLine(s: {
+    effort: string;
+    previous: string | null;
+    trail?: string[];
+    phase: string;
+    source: string;
+}): string;

@@ -29,10 +29,12 @@ test('inline badges preserve streamed text and appear once per message', () => {
   assert.deepEqual(display.handle(message(1, 'A later chunk.')), {});
   assert.deepEqual(display.handle({ ...message(2, ''), final: true }), {});
   assert.deepEqual(display.handle(preTool), {}, 'a text badge already announced this decision');
-  assert.deepEqual(display.handle({ ...message(), message_id: 'm2' }), {
+  assert.deepEqual(display.handle({ ...message(), message_id: 'm2' }), {}, 'unchanged level: no badge, the status line shows it');
+  display.record('s', 'main', { ...decision, effort: 'medium', previous: 'high' });
+  assert.deepEqual(display.handle({ ...message(), message_id: 'm3' }), {
     hookSpecificOutput: {
       hookEventName: 'MessageDisplay',
-      displayContent: '> **◆ Jev · HIGH · diagnosing**\n\nInvestigating the test failure.\n',
+      displayContent: '> **◆ Jev · HIGH → MEDIUM · diagnosing**\n\nInvestigating the test failure.\n',
     },
   });
 });
@@ -111,10 +113,47 @@ test('a text badge shows every level since the previous badge', () => {
   display.record('s', 'main', step('high', 'high')); // unchanged
   display.record('s', 'main', step('medium', 'high')); // tests pass
   assert.match(JSON.stringify(display.handle(message())), /Jev · LOW → MEDIUM → HIGH → MEDIUM · diagnosing/);
-  assert.match(JSON.stringify(display.handle({ ...message(), message_id: 'm2' })), /Jev · MEDIUM · diagnosing/, 'next badge starts from the level in force');
+  assert.deepEqual(display.handle({ ...message(), message_id: 'm2' }), {}, 'no change since the last badge: no badge');
+  display.record('s', 'main', { ...step('low', 'medium'), kind: 'task' }); // a new prompt, same session
+  assert.match(JSON.stringify(display.handle({ ...message(), message_id: 'm3' })), /Jev · MEDIUM → LOW/, 'a new prompt announces its level');
+  display.record('s', 'main', { ...step('low', 'low'), kind: 'task' });
+  assert.match(JSON.stringify(display.handle({ ...message(), message_id: 'm4' })), /Jev · LOW · diagnosing/, 'even when unchanged, the first message of a prompt gets a badge');
 });
 
 test('tool notices are opt-in', () => {
   assert.deepEqual(Object.keys(inlineEffortSettings('http://x/h').hooks!), ['MessageDisplay']);
   assert.deepEqual(Object.keys(inlineEffortSettings('http://x/h', { toolNotices: true }).hooks!).sort(), ['MessageDisplay', 'PreToolUse']);
+});
+
+test('narration: one short line before each tool call, merged with a caller prompt', async () => {
+  const { withNarration, NARRATION_PROMPT } = await import('../src/gateway/settings.ts');
+  assert.deepEqual(withNarration(['-c']), ['--append-system-prompt', NARRATION_PROMPT, '-c']);
+  assert.deepEqual(withNarration(['--append-system-prompt', 'Be terse.']), ['--append-system-prompt', `Be terse.\n\n${NARRATION_PROMPT}`]);
+  assert.deepEqual(withNarration(['--append-system-prompt=Be terse.']), [`--append-system-prompt=Be terse.\n\n${NARRATION_PROMPT}`]);
+  assert.deepEqual(withNarration(['--', '--append-system-prompt', 'x']), ['--append-system-prompt', NARRATION_PROMPT, '--', '--append-system-prompt', 'x'], 'arguments after -- are not flags');
+});
+
+test('status line shows the current prompt\'s whole effort path, newest level in capitals', async () => {
+  const { formatStatusLine } = await import('../src/gateway/launch.ts');
+  assert.equal(formatStatusLine({ effort: 'medium', previous: 'high', trail: ['medium', 'high', 'medium'], phase: 'verifying', source: 'jev' }), '◆ Jev · medium → high → MEDIUM · verifying');
+  assert.equal(formatStatusLine({ effort: 'high', previous: 'medium', phase: 'diagnosing', source: 'local' }), '◆ Jev · medium → HIGH · diagnosing', 'older status files without a trail');
+  assert.equal(formatStatusLine({ effort: 'low', previous: null, trail: ['low', 'medium', 'high', 'medium', 'high', 'medium', 'low'], phase: 'finishing', source: 'heuristic' }), '◆ Jev · … → high → medium → high → medium → LOW · finishing · local routing');
+});
+
+test('gateway status file carries the path of the current prompt and resets on a new prompt', async () => {
+  const { JevGateway, readStatus } = await import('../src/gateway/server.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-status-'));
+  try {
+    const gw = new JevGateway({ jev: null, bounds: { min: 'low', max: 'high' }, statusDir: dir });
+    const write = (d: EffortDecision) => (gw as unknown as { writeStatus(s: string, a: string, d: EffortDecision): void }).writeStatus('sess1', 'main', d);
+    write({ ...decision, kind: 'task', effort: 'medium', previous: null });
+    write({ ...decision, effort: 'high', previous: 'medium' });
+    write({ ...decision, effort: 'high', previous: 'high' });
+    write({ ...decision, effort: 'medium', previous: 'high' });
+    assert.deepEqual(readStatus(dir, 'sess1')!.trail, ['medium', 'high', 'medium']);
+    write({ ...decision, kind: 'task', effort: 'low', previous: 'medium' });
+    assert.deepEqual(readStatus(dir, 'sess1')!.trail, ['medium', 'low'], 'a new prompt starts from the level in force');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

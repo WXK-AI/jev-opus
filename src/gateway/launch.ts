@@ -9,7 +9,7 @@ import type { Bounds } from '../router/policy.ts';
 import { formatDecision } from '../ui.ts';
 import { JevGateway, readStatus } from './server.ts';
 import { inlineEffortSettings } from './display.ts';
-import { withGatewaySettings } from './settings.ts';
+import { withGatewaySettings, withNarration } from './settings.ts';
 
 export const JEV_MODEL_ID = 'jev/claude-opus-5-5';
 export const STATUS_DIR = path.join(CONFIG_DIR, 'status');
@@ -68,7 +68,9 @@ export async function launchClaude(jev: JevLike | null, bounds: Bounds, claudeAr
     const cli = fileURLToPath(new URL('../cli.' + (import.meta.url.endsWith('.ts') ? 'ts' : 'js'), import.meta.url));
     const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
     const command = `${quote(process.execPath)} ${quote(cli)} statusline`;
-    const args = withGatewaySettings(claudeArgs, {
+    // Opus 5.5 turns most mid-task notes into hidden progress blocks, so narration is opt-in.
+    const base = process.env.JEV_OPUS_NARRATION === '1' ? withNarration(claudeArgs) : [...claudeArgs];
+    const args = withGatewaySettings(base, {
       ...(process.env.JEV_OPUS_NO_INLINE_EFFORT === '1' ? {} : inlineEffortSettings(baseUrl + gateway.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES === '1' })),
       ...(process.env.JEV_OPUS_NO_STATUSLINE === '1' ? {} : { statusLine: { type: 'command' as const, command } }),
     });
@@ -96,12 +98,20 @@ export async function statusline(): Promise<void> {
   try {
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { session_id?: string; model?: { id?: string; display_name?: string } };
     session = input.session_id ?? '';
-    model = input.model?.display_name ?? input.model?.id ?? '';
+    // Claude Code reports the resolved display name ("Opus 5.5"), so recognise Jev by its model ID.
+    model = `${input.model?.id ?? ''} ${input.model?.display_name ?? ''}`;
   } catch {
     // no input: still print something useful
   }
   const s = session ? readStatus(STATUS_DIR, session) : null;
-  if (!s) return void process.stdout.write(`◆ Jev ${model.includes('Jev') ? 'waiting for first step' : 'off (pick "Opus 5.5 · Jev" in /model)'}`);
-  const arrow = s.previous && s.previous !== s.effort ? `${s.previous} → ` : '';
-  process.stdout.write(`◆ Jev ${arrow}${s.effort.toUpperCase()}${s.phase ? ` · ${s.phase}` : ''}${s.source === 'heuristic' ? ' (heuristic)' : ''}`);
+  if (!s) return void process.stdout.write(`◆ Jev ${/jev\/|Jev/.test(model) ? 'waiting for the first step' : 'off (pick "Opus 5.5 · Jev" in /model)'}`);
+  process.stdout.write(formatStatusLine(s));
+}
+
+/** "◆ Jev · MEDIUM → HIGH → MEDIUM · verifying": the current prompt's whole path, newest last. */
+export function formatStatusLine(s: { effort: string; previous: string | null; trail?: string[]; phase: string; source: string }): string {
+  const trail = s.trail?.length ? s.trail : s.previous && s.previous !== s.effort ? [s.previous, s.effort] : [s.effort];
+  const shown = trail.length > 6 ? ['…', ...trail.slice(-5)] : trail;
+  const path = shown.map((e, i) => (i === shown.length - 1 ? e.toUpperCase() : e.toLowerCase())).join(' → ');
+  return `◆ Jev · ${path}${s.phase ? ` · ${s.phase.replaceAll('_', ' ')}` : ''}${s.source === 'heuristic' ? ' · local routing' : ''}`;
 }

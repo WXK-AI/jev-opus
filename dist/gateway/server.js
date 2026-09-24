@@ -97,6 +97,10 @@ export class JevGateway {
                 const shape = Array.isArray(parsed.messages)
                     ? parsed.messages.map((m) => `${m.role}${m.output_config ? `{${JSON.stringify(m.output_config)}}` : ''}[${Array.isArray(m.content) ? m.content.map((b) => b.type).join('+') : typeof m.content}]`).join(' ')
                     : '';
+                const lastMsg = Array.isArray(parsed.messages) ? parsed.messages.at(-1) : undefined;
+                const lastText = lastMsg ? JSON.stringify(lastMsg.content).slice(0, 160) : '';
+                const hdrs = Object.keys(headers).filter((h) => h.startsWith('x-') || h.startsWith('anthropic-')).join(',');
+                this.opts.onNotice?.(`debug headers=${hdrs} last=${lastText}`);
                 this.opts.onNotice?.(`debug ${pathname} model=${String(parsed.model)} messages=${msgs} tools=${tools} session=${headers['x-claude-code-session-id'] ?? '-'} agent=${headers['x-claude-code-agent-id'] ?? '-'} top=${JSON.stringify(parsed.output_config ?? null)} beta=${headers['anthropic-beta'] ?? ''} :: ${shape}`);
             }
             if (parsed && isJevModel(parsed.model)) {
@@ -217,6 +221,11 @@ export class JevGateway {
         const t = this.thread(key, messages, hashes);
         const lastUser = lastIndexOfRole(messages, 'user');
         if (lastUser < 0)
+            return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
+        // Claude Code forks the conversation for side queries such as the next-prompt
+        // suggestion. Replay our statements so the fork shares the cache, but don't
+        // route it: it isn't a user prompt, and it must not move the status line.
+        if (isSideQuery(messages[lastUser]))
             return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
         const fp = requestFingerprint(hashes[lastUser + 1], body);
         const hit = t.prepared.get(fp);
@@ -427,18 +436,37 @@ export class JevGateway {
             this.threads.delete(this.threads.keys().next().value);
         return t;
     }
+    /** effort path of the current prompt per session, shown live in the status line */
+    trails = new Map();
     writeStatus(session, agent, d) {
         if (!this.opts.statusDir || agent !== 'main' || !/^[\w-]+$/.test(session))
             return;
         try {
             fs.mkdirSync(this.opts.statusDir, { recursive: true });
             const phase = d.signals?.phase ?? d.profile?.taskType ?? '';
-            fs.writeFileSync(path.join(this.opts.statusDir, `${session}.json`), JSON.stringify({ effort: d.effort, previous: d.previous, phase, source: d.source, at: Date.now() }));
+            // A new prompt starts a new path; every later change extends it.
+            let trail = d.kind === 'task' ? (d.previous && d.previous !== d.effort ? [d.previous] : []) : this.trails.get(session) ?? [];
+            if (trail.at(-1) !== d.effort)
+                trail = [...trail, d.effort];
+            this.trails.delete(session);
+            this.trails.set(session, trail);
+            while (this.trails.size > 256)
+                this.trails.delete(this.trails.keys().next().value);
+            fs.writeFileSync(path.join(this.opts.statusDir, `${session}.json`), JSON.stringify({ effort: d.effort, previous: d.previous, trail, phase, source: d.source, at: Date.now() }));
         }
         catch {
             // the statusline is cosmetic
         }
     }
+}
+/** Claude Code's forked side queries (next-prompt suggestion) announce themselves in the appended user turn. */
+const SIDE_QUERY_MARKERS = ['[SUGGESTION MODE:'];
+export function isSideQuery(m) {
+    if (!m || m.role !== 'user')
+        return false;
+    const text = typeof m.content === 'string' ? m.content
+        : Array.isArray(m.content) ? m.content.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('\n') : '';
+    return SIDE_QUERY_MARKERS.some((marker) => text.includes(marker));
 }
 /** Insertions whose stored prefix is still a prefix of this request. */
 function validInsertions(insertions, messages, hashes) {

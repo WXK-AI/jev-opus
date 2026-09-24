@@ -483,3 +483,31 @@ test('telemetry: a response longer than the copy cap still records the final usa
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a next-prompt suggestion fork replays statements but is never routed or recorded', async () => {
+  const up = await fakeUpstream();
+  const jev = scriptedJev([
+    { task_type: { choice: 'debugging', confidence: 0.9 }, difficulty: { score: 1.0 }, stakes: { noul: 0.1 } },
+  ]);
+  const dir = tmpdir();
+  const decided: string[] = [];
+  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, onDecision: (_s, d) => decided.push(d.kind) });
+  const base = await gw.listen();
+  try {
+    const m1 = [u('the date test fails, fix it')];
+    await post(base, body(m1));
+    const sent1 = up.seen.at(-1)!.body!.messages as Message[];
+    const fork = [...m1, { role: 'assistant', content: [{ type: 'text', text: 'Fixed.' }] } as Message,
+      u('[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]\n\nFIRST: Look at the user\'s recent messages')];
+    await post(base, body(fork));
+    const sentFork = up.seen.at(-1)!.body!.messages as Message[];
+    assert.deepEqual(sentFork.slice(0, sent1.length), sent1, 'the fork carries the same prefix, so it shares the cache');
+    assert.equal(sentFork.length, sent1.length + 2, 'no new statement for the fork');
+    assert.deepEqual(decided, ['task'], 'only the real prompt was routed');
+    assert.equal(jev.calls, 1);
+  } finally {
+    await gw.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

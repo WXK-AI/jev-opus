@@ -2,6 +2,7 @@ import type { Effort } from '../effort.ts';
 import type { JevLike } from '../jev/client.ts';
 import type { Bounds } from '../router/policy.ts';
 import type { EffortDecision } from '../router/types.ts';
+import { type Message } from './transcript.ts';
 /**
  * Local Anthropic-Messages gateway. Claude Code (CLI, IDE extensions, Agent SDK)
  * points ANTHROPIC_BASE_URL here and picks the "jev/…" model in /model.
@@ -76,11 +77,15 @@ export declare class JevGateway {
     private restore;
     private journalAppend;
     private thread;
+    /** effort path of the current prompt per session, shown live in the status line */
+    private readonly trails;
     private writeStatus;
 }
+export declare function isSideQuery(m: Message | undefined): boolean;
 export declare function readStatus(statusDir: string, session: string): {
     effort: Effort;
     previous: Effort | null;
+    trail?: string[];
     phase: string;
     source: string;
     at: number;

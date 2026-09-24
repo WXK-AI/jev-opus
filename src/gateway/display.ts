@@ -17,6 +17,8 @@ export function formatEffortTrail(trail: readonly string[], d: EffortDecision): 
 
 interface Entry {
   decision: EffortDecision;
+  /** a new prompt started and its first message hasn't been badged yet */
+  announce: boolean;
   /** levels in force since the last badge was shown, deduplicated in order */
   trail: string[];
   /** a tool notice was already emitted for the latest decision */
@@ -45,7 +47,7 @@ export class EffortDisplay {
     const trail = prior ? [...prior.trail] : decision.previous ? [decision.previous] : [];
     if (trail.at(-1) !== decision.effort) trail.push(decision.effort);
     this.entries.delete(key);
-    this.entries.set(key, { decision, trail, noticed: false });
+    this.entries.set(key, { decision, trail, noticed: false, announce: decision.kind === 'task' || (prior?.announce ?? true) });
     while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
   }
 
@@ -65,6 +67,11 @@ export class EffortDisplay {
       // Each message can stream many deltas. Prefix only its first delta;
       // all subsequent text passes through exactly as Claude produced it.
       if (i.index !== 0 || typeof i.delta !== 'string' || !i.delta) return {};
+      // Badge where it carries information: the first message of a prompt, and
+      // wherever the level changed since the last badge. The status line shows
+      // the steady state, so unchanged steps stay clean.
+      if (!entry.announce && entry.trail.length <= 1) return {};
+      entry.announce = false;
       const badge = formatEffortTrail(entry.trail, entry.decision);
       entry.trail = [entry.decision.effort]; // the next badge starts from the level now in force
       entry.noticed = true; // this badge announced the change; no tool notice repeats it
