@@ -113,7 +113,7 @@ export const config = {
     openrouterModel: process.env.JEV_OPENROUTER_MODEL || 'typesafe/jev-1.13',
     // One overall deadline per decision — Jev sits in the request path, so the
     // budget is small; retries (opt-in) must still finish inside it.
-    deadlineMs: envInt('JEV_DEADLINE_MS', 1_500),
+    deadlineMs: envInt('JEV_DEADLINE_MS', 2_500), // live Jev p99 was ~1.6s
     retries: envInt('JEV_RETRIES', 0),
     breakerThreshold: envInt('JEV_BREAKER_THRESHOLD', 3, 1),
     breakerCooldownMs: envInt('JEV_BREAKER_COOLDOWN_MS', 30_000),
