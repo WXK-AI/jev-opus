@@ -1,23 +1,82 @@
 import os from 'node:os';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 import { isEffort } from './effort.js';
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const CONFIG_DIR = process.env.JEV_OPUS_CONFIG_DIR
     || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'jev-opus');
 export const CONFIG_ENV_FILE = path.join(CONFIG_DIR, '.env');
-// Values already in the environment win; then a repo-clone .env; then the user config file.
+/**
+ * Variables written in jev-opus .env files, kept separate from the inherited
+ * environment. A parent Claude Code session exports its own ANTHROPIC_* /
+ * CLAUDE_* keys; without provenance those would be indistinguishable from
+ * credentials the user configured for the child.
+ *
+ * Precedence matches the old `process.loadEnvFile` loop: values already in the
+ * environment win, then the repo-clone .env, then the user config file.
+ */
+export const envFileVars = new Map();
 for (const file of [path.join(PROJECT_ROOT, '.env'), CONFIG_ENV_FILE]) {
+    let parsed;
     try {
-        process.loadEnvFile(file);
+        parsed = parseEnv(readFileSync(file, 'utf8'));
     }
     catch {
-        // missing file — fine, `doctor` reports anything required that is unset
+        continue; // missing file — fine, `doctor` reports anything required that is unset
+    }
+    for (const [k, v] of Object.entries(parsed)) {
+        if (v === undefined)
+            continue;
+        if (!envFileVars.has(k))
+            envFileVars.set(k, { value: v, file });
+        if (process.env[k] === undefined)
+            process.env[k] = v;
     }
 }
 function envEffort(name, fallback) {
     const v = process.env[name];
     return isEffort(v) ? v : fallback;
+}
+function envInt(name, fallback, min = 0) {
+    const raw = process.env[name];
+    if (!raw)
+        return fallback;
+    const v = Number(raw);
+    return Number.isFinite(v) && v >= min ? Math.floor(v) : fallback;
+}
+const noCredential = () => ({ value: '', source: '' });
+/**
+ * The credential handed to the Claude Code child process. Only JEV_OPUS_*
+ * variables and values written in a jev-opus .env file are used. A plain
+ * ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN found in the environment may
+ * have been injected by a parent Claude session — `childEnv` strips it, so
+ * using it here would silently reintroduce exactly what was removed. It is
+ * honored only when `inherit` (JEV_OPUS_INHERIT_CREDENTIALS=1).
+ */
+export function resolveClaudeCredentials(env, fileVars, opts = {}) {
+    const pick = (jevName, plainName) => {
+        const direct = env[jevName];
+        if (direct)
+            return { value: direct, source: jevName };
+        if (plainName) {
+            const fromFile = fileVars.get(plainName);
+            if (fromFile?.value)
+                return { value: fromFile.value, source: fromFile.file };
+            const inherited = env[plainName];
+            if (inherited && opts.inherit) {
+                return { value: inherited, source: `inherited environment (JEV_OPUS_INHERIT_CREDENTIALS=1)` };
+            }
+        }
+        return noCredential();
+    };
+    return {
+        apiKey: pick('JEV_OPUS_ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY'),
+        oauthToken: pick('JEV_OPUS_CLAUDE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'),
+        authToken: pick('JEV_OPUS_ANTHROPIC_AUTH_TOKEN'),
+        baseUrl: pick('JEV_OPUS_ANTHROPIC_BASE_URL'),
+    };
 }
 export const config = {
     model: process.env.JEV_OPUS_MODEL || 'claude-opus-5-5',
@@ -34,19 +93,15 @@ export const config = {
         model: process.env.JEV_MODEL || 'jev-latest',
         openrouterUrl: process.env.JEV_OPENROUTER_URL || 'https://openrouter.ai/api/alpha/decisions',
         openrouterModel: process.env.JEV_OPENROUTER_MODEL || 'typesafe/jev-1.13',
-        timeoutMs: 8_000,
-        retries: 1,
+        // One overall deadline per decision — Jev sits in the request path, so the
+        // budget is small; retries (opt-in) must still finish inside it.
+        deadlineMs: envInt('JEV_DEADLINE_MS', 1_500),
+        retries: envInt('JEV_RETRIES', 0),
+        breakerThreshold: envInt('JEV_BREAKER_THRESHOLD', 3, 1),
+        breakerCooldownMs: envInt('JEV_BREAKER_COOLDOWN_MS', 30_000),
         inputPricePerMillion: 0.042,
     },
-    /**
-     * Credentials handed to the Claude Code child process. Only what is set in
-     * the jev-opus config or the launching shell — never the variables a
-     * parent Claude Code / desktop session injected.
-     */
-    claudeCredentials: {
-        apiKey: process.env.JEV_OPUS_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || '',
-        oauthToken: process.env.JEV_OPUS_CLAUDE_OAUTH_TOKEN || process.env.CLAUDE_CODE_OAUTH_TOKEN || '',
-        authToken: process.env.JEV_OPUS_ANTHROPIC_AUTH_TOKEN || '',
-        baseUrl: process.env.JEV_OPUS_ANTHROPIC_BASE_URL || '',
-    },
+    claudeCredentials: resolveClaudeCredentials(process.env, envFileVars, {
+        inherit: process.env.JEV_OPUS_INHERIT_CREDENTIALS === '1',
+    }),
 };
