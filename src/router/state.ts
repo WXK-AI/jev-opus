@@ -56,9 +56,22 @@ export function emptyCore(): CoreState {
   return { clock: 0, issues: [], last: null };
 }
 
+/**
+ * Output plumbing that doesn't change what a command runs: `npm test`,
+ * `npm test 2>&1 | tail -30`, and `cd app && npm test` are the same check, so a
+ * later pass of any of them clears the same issue.
+ */
+function coreCommand(summary: string): string {
+  let s = summary.replace(/\s+/g, ' ').trim().toLowerCase();
+  s = s.replace(/^(cd \S+ (&&|;) )+/, '');
+  s = s.replace(/\s*\d?>&\d/g, '').replace(/\s*\d?>\s*\/dev\/null/g, '');
+  s = s.replace(/\s*\|\s*(tail|head|grep|cat|less|tee|sed|awk|wc)\b.*$/, '');
+  return s.trim();
+}
+
 /** Command/test identity: which later pass can clear the issue. */
 export function commandKey(call: ToolCallSummary): string {
-  return `${call.tool}:${call.summary.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 160)}`;
+  return `${call.tool}:${coreCommand(call.summary).slice(0, 160)}`;
 }
 
 /** Strip volatile content (numbers, paths, timestamps, ANSI) so the same error fingerprints identically. */

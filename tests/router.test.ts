@@ -399,3 +399,12 @@ test('decisions carry policy and question-set versions', async () => {
     assert.deepEqual(d.questionVersions, { task: TASK_SET_VERSION, step: STEP_SET_VERSION });
   }
 });
+
+test('commandKey ignores output plumbing so a piped rerun clears the same issue', async () => {
+  const { commandKey } = await import('../src/router/state.ts');
+  const k = (summary: string) => commandKey({ tool: 'Bash', summary, failed: false, result: '' });
+  assert.equal(k('npm test 2>&1 | tail -30'), k('npm test'));
+  assert.equal(k('cd app && npm test | grep -E "pass|fail"'), k('npm test'));
+  assert.equal(k('npm test > /dev/null 2>&1'), k('npm test'));
+  assert.notEqual(k('npm run lint'), k('npm test'));
+});
