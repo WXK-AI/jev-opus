@@ -16,6 +16,17 @@ export declare function createGateway(jev: JevLike | null, bounds: Bounds, opts?
     trace?: (e: Record<string, unknown>) => void;
 }): JevGateway;
 /** `jev-opus claude [claude args…]`: gateway in-process + the normal interactive Claude Code on top of it. */
+/** Oldest Claude Code that accepts claude-opus-5-5 and per-turn effort. */
+export declare const MIN_CLAUDE_VERSION = "2.1.280";
+export declare function versionAtLeast(version: string, min: string): boolean;
+/** The Claude Code that `claude` resolves to on this PATH, or an explanation of why it can't be used. */
+export declare function checkClaude(bin: string, env: Record<string, string>): {
+    ok: true;
+    version: string;
+} | {
+    ok: false;
+    message: string;
+};
 export declare function launchClaude(jev: JevLike | null, bounds: Bounds, claudeArgs: string[], trace?: (e: Record<string, unknown>) => void): Promise<number>;
 /** Claude Code statusLine command: shows the effort Jev picked for this session. */
 export declare function statusline(): Promise<void>;

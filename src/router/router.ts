@@ -6,7 +6,7 @@ import {
   PHASES, STEP_QUESTIONS, STEP_SET_VERSION, TASK_QUESTIONS, TASK_SET_VERSION, TASK_TYPES,
   type Phase, type TaskType,
 } from './questions.ts';
-import { emptyCore, reasoningIssues, reduceBatch, reviveCore, serializeCore, type CoreState } from './state.ts';
+import { emptyCore, isExploratoryFailure, reasoningIssues, reduceBatch, reviveCore, serializeCore, type CoreState } from './state.ts';
 import type { EffortDecision, JevResponse, StepContext, StepSignals, TaskProfile } from './types.ts';
 
 const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n)}…[+${s.length - n} chars]`);
@@ -141,7 +141,9 @@ export class EffortRouter {
     const recovered = outcome.resolved.some((i) => !i.environment) && reasoning.length === 0;
     if (recovered) this.hold = 0;
 
-    const local = heuristicStepSignals(ctx, { ignoreFailures: outcome.environmentOnly });
+    // Exploratory lookups that failed don't steer the phase toward diagnosing.
+    const judged = outcome.exploratoryFailures ? { ...ctx, lastBatch: ctx.lastBatch.map((c) => (c.failed && isExploratoryFailure(c) ? { ...c, failed: false } : c)) } : ctx;
+    const local = heuristicStepSignals(judged, { ignoreFailures: outcome.environmentOnly });
     const localRoutine = local.phase !== 'diagnosing' || recovered;
     let signals: StepSignals = local;
     let routineOk = localRoutine;
@@ -157,7 +159,7 @@ export class EffortRouter {
     const consult = outcome.failedCalls > 0 || proposedDown || local.phaseConfidence < 0.5;
 
     if (this.jev && consult) {
-      const res = (await this.jev.ask(this.stepAskState(ctx), STEP_QUESTIONS)) as JevResponse;
+      const res = (await this.jev.ask(this.stepAskState(judged), STEP_QUESTIONS)) as JevResponse;
       jevLatencyMs = res.latencyMs;
       if (res.failed || res.circuitOpen) {
         jevError = res.error ?? 'jev circuit open';

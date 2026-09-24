@@ -484,3 +484,27 @@ test('actual date-debug session: grep-filtered setup and repair resolve the same
   assert.ok(recovered.reasons.some(r=>r.includes('now passes')));
   assert.equal(issues(router).length,0);
 });
+
+test('a failed exploratory lookup (glob with no matches) neither escalates nor lingers', async () => {
+  const { EffortRouter } = await import('../src/router/router.ts');
+  const { isExploratoryFailure } = await import('../src/router/state.ts');
+  const b = (summary: string, failed: boolean, result: string, runner?: string) => ({ tool: 'Bash', summary, failed, result, ...(runner ? { runner } : {}) });
+  assert.equal(isExploratoryFailure(b('ls && cat package.json 2>/dev/null; cat dates.js; ls test* *.test.js 2>/dev/null', true, 'zsh: no matches found: test*')), true);
+  assert.equal(isExploratoryFailure({ tool: 'Read', summary: 'missing.js', failed: true, result: 'File does not exist' }), true);
+  assert.equal(isExploratoryFailure(b('cat dates.test.js && npm test 2>&1 | tail -30', true, 'not ok 1', 'npm test')), false, 'a test run is never exploratory');
+  assert.equal(isExploratoryFailure(b('rm -rf build && make', true, 'error')), false);
+
+  // The demo's exact sequence: exploratory ls fails, tests fail, sed + tests pass.
+  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
+  const task = await r.routeTask('The tests fail. Find and fix the bugs in dates.js', null);
+  assert.equal(task.effort, 'medium');
+  const ctx = (current: Effort, batch: ReturnType<typeof b>[], turn: number) => ({
+    prompt: 'fix the tests', profile: task.profile!, turn, current, consecutiveFailures: 0, assistantNote: '', trajectory: [], lastBatch: batch,
+  });
+  const look = await r.routeStep(ctx('medium', [b('ls && cat package.json 2>/dev/null; cat dates.js; ls test* *.test.js 2>/dev/null', true, 'zsh: no matches found: test*')], 1));
+  assert.notEqual(look.effort, 'high', 'looking around does not escalate');
+  const fail = await r.routeStep(ctx(look.effort, [b('cat dates.test.js && npm test 2>&1 | tail -30', true, 'not ok 1 - leap years', 'npm test')], 2));
+  assert.equal(fail.effort, 'high', 'the real test failure escalates');
+  const pass = await r.routeStep(ctx('high', [b("sed -i '' -e 's/a/b/' dates.js && npm test 2>&1 | tail -30", false, '# pass 3 # fail 0', 'npm test')], 3));
+  assert.equal(pass.effort, 'medium', 'nothing lingers from the ls: effort steps down once the tests pass');
+});

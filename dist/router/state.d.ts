@@ -35,8 +35,10 @@ export interface BatchOutcome {
     repeated: Issue[];
     /** issues cleared because their command/test passed in this batch */
     resolved: Issue[];
-    /** tool calls that failed in this batch, environment or not */
+    /** tool calls that failed in this batch, environment or not (exploratory lookups excluded) */
     failedCalls: number;
+    /** failed read-only lookups (ls, cat, find, grep, Read …): not correctness evidence */
+    exploratoryFailures: number;
     /** failed calls classified as environment blockers */
     environmentFailures: number;
     /** every failure in this batch was an environment blocker */
@@ -63,6 +65,12 @@ export declare function normalizeError(text: string): string;
 export declare function identity(text: string): string;
 /** Stable failure fingerprint: the command/test plus its normalized error text. */
 export declare function fingerprint(call: ToolCallSummary): string;
+/**
+ * A failed call that only looked something up: a lookup tool, or a shell
+ * command whose every segment is a read-only lookup. A command with a test or
+ * build runner is never exploratory, so check failures always count.
+ */
+export declare function isExploratoryFailure(call: ToolCallSummary): boolean;
 export declare function isEnvironmentFailure(call: ToolCallSummary): boolean;
 /** Issues that reflect reasoning problems, not environment blockers. */
 export declare function reasoningIssues(state: CoreState): Issue[];

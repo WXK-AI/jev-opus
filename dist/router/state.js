@@ -53,6 +53,23 @@ const ENVIRONMENT_PATTERNS = [
     /\bnpm (err|error)!?\s*(code\s+)?(econnrefused|enotfound|etimedout|eai_again|network)|registry[^\n]{0,60}(unreachable|timed out|error|unable)|temporary failure resolving/i,
     /\b(rate limit(ed)?|too many requests|service unavailable|bad gateway|gateway time-?out|upstream (error|unavailable))\b/i,
 ];
+const LOOKUP_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'NotebookRead', 'WebFetch', 'WebSearch']);
+const LOOKUP_COMMANDS = new Set(['ls', 'cat', 'find', 'grep', 'rg', 'head', 'tail', 'stat', 'file', 'which', 'type', 'test', '[', 'pwd', 'echo', 'wc', 'tree', 'eza', 'bat', 'less', 'more', 'du', 'df', 'readlink', 'realpath', 'basename', 'dirname', 'printf', 'true', 'command', 'cd']);
+/**
+ * A failed call that only looked something up: a lookup tool, or a shell
+ * command whose every segment is a read-only lookup. A command with a test or
+ * build runner is never exploratory, so check failures always count.
+ */
+export function isExploratoryFailure(call) {
+    if (call.runner)
+        return false;
+    if (LOOKUP_TOOLS.has(call.tool))
+        return true;
+    if (call.tool !== 'Bash')
+        return false;
+    const segments = call.summary.replace(/…$/, '').split(/&&|\|\||;|\|/).map((x) => x.trim()).filter(Boolean);
+    return segments.length > 0 && segments.every((seg) => LOOKUP_COMMANDS.has(seg.split(/\s+/)[0].replace(/^command$/, 'command')));
+}
 export function isEnvironmentFailure(call) {
     const text = `${call.result}\n${call.summary}`;
     return ENVIRONMENT_PATTERNS.some((re) => re.test(text));
@@ -70,12 +87,18 @@ export function reduceBatch(state, batch, effort) {
     const clock = state.clock + 1;
     const outcome = {
         newIssues: [], repeated: [], resolved: [],
-        failedCalls: 0, environmentFailures: 0, environmentOnly: false, progress: 'steady',
+        failedCalls: 0, exploratoryFailures: 0, environmentFailures: 0, environmentOnly: false, progress: 'steady',
     };
     const cleared = new Set();
     for (const call of batch) {
         const readable = commandKey(call);
         const command = identity(readable);
+        // Looking around (a glob with no matches, a missing file) is not a
+        // correctness failure: it neither escalates nor lingers as an open issue.
+        if (call.failed && isExploratoryFailure(call)) {
+            outcome.exploratoryFailures++;
+            continue;
+        }
         if (call.failed) {
             outcome.failedCalls++;
             const environment = isEnvironmentFailure(call);

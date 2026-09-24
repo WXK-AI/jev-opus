@@ -165,13 +165,13 @@ test('changed history at the same boundary is a new decision routed from the com
   try {
     const m1 = [u('rename x to y')];
     await post(base, body(m1));
-    const mOk = [...m1, a('t1', 'ls'), r('t1', 'dates.js')];
+    const mOk = [...m1, a('t1', 'npm test'), r('t1', '# pass 3 # fail 0')];
     await post(base, body(mOk));
     const sentOk = up.seen.at(-1)!.body!.messages as Message[];
     assert.deepEqual(sentOk[3], { role: 'system', content: [], output_config: { effort: 'low' } }, 'a successful step de-escalates to low');
 
     // Same last-user index, different fingerprint: the tool result changed from success to failure.
-    const mFail = [...m1, a('t1', 'ls'), r('t1', 'Exit code 1: 2 failing', true)];
+    const mFail = [...m1, a('t1', 'npm test'), r('t1', 'Exit code 1: 2 failing', true)];
     await post(base, body(mFail));
     assert.equal(jev.calls, 3, 'changed history re-routes instead of replaying');
     const sentFail = up.seen.at(-1)!.body!.messages as Message[];

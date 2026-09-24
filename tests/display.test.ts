@@ -234,3 +234,25 @@ test('step badges use plain labels, never raw policy reasons', async () => {
   assert.equal(formatEffortBadge(step(['exploring → -1', '2 unresolved issue(s) → hold high'])), '◆ Jev · MEDIUM → LOW · unresolved failure, holding');
   assert.equal(formatEffortBadge(step(['environment blocker → hold'])), '◆ Jev · MEDIUM → LOW · environment issue, holding');
 });
+
+test('Claude Code version guard', async () => {
+  const { versionAtLeast, checkClaude } = await import('../src/gateway/launch.ts');
+  assert.equal(versionAtLeast('2.1.281', '2.1.280'), true);
+  assert.equal(versionAtLeast('2.1.280', '2.1.280'), true);
+  assert.equal(versionAtLeast('2.1.195', '2.1.280'), false);
+  assert.equal(versionAtLeast('2.2.0', '2.1.280'), true);
+  assert.equal(versionAtLeast('1.9.999', '2.1.280'), false);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-claude-'));
+  try {
+    const fake = path.join(dir, 'claude');
+    fs.writeFileSync(fake, '#!/bin/sh\necho "2.1.195 (Claude Code)"\n', { mode: 0o755 });
+    const old = checkClaude(fake, { PATH: '/usr/bin:/bin' });
+    assert.equal(old.ok, false);
+    assert.match(!old.ok ? old.message : '', /2\.1\.195.*2\.1\.280 or newer/);
+    fs.writeFileSync(fake, '#!/bin/sh\necho "2.1.281 (Claude Code)"\n', { mode: 0o755 });
+    assert.deepEqual(checkClaude(fake, { PATH: '/usr/bin:/bin' }), { ok: true, version: '2.1.281' });
+    assert.equal(checkClaude(path.join(dir, 'missing'), { PATH: '/usr/bin:/bin' }).ok, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

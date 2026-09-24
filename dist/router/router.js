@@ -2,7 +2,7 @@ import { clampEffort, isEffort, rank } from '../effort.js';
 import { heuristicStepSignals, heuristicTaskProfile } from './heuristics.js';
 import { applyHysteresis, normalizeBounds, POLICY_VERSION, stepTarget, taskEffort } from './policy.js';
 import { PHASES, STEP_QUESTIONS, STEP_SET_VERSION, TASK_QUESTIONS, TASK_SET_VERSION, TASK_TYPES, } from './questions.js';
-import { emptyCore, reasoningIssues, reduceBatch, reviveCore, serializeCore } from './state.js';
+import { emptyCore, isExploratoryFailure, reasoningIssues, reduceBatch, reviveCore, serializeCore } from './state.js';
 const clip = (s, n) => (s.length <= n ? s : `${s.slice(0, n)}…[+${s.length - n} chars]`);
 const QUESTION_VERSIONS = { task: TASK_SET_VERSION, step: STEP_SET_VERSION };
 /**
@@ -123,7 +123,9 @@ export class EffortRouter {
         const recovered = outcome.resolved.some((i) => !i.environment) && reasoning.length === 0;
         if (recovered)
             this.hold = 0;
-        const local = heuristicStepSignals(ctx, { ignoreFailures: outcome.environmentOnly });
+        // Exploratory lookups that failed don't steer the phase toward diagnosing.
+        const judged = outcome.exploratoryFailures ? { ...ctx, lastBatch: ctx.lastBatch.map((c) => (c.failed && isExploratoryFailure(c) ? { ...c, failed: false } : c)) } : ctx;
+        const local = heuristicStepSignals(judged, { ignoreFailures: outcome.environmentOnly });
         const localRoutine = local.phase !== 'diagnosing' || recovered;
         let signals = local;
         let routineOk = localRoutine;
@@ -136,7 +138,7 @@ export class EffortRouter {
         const proposedDown = rank(target.effort) < rank(ctx.current);
         const consult = outcome.failedCalls > 0 || proposedDown || local.phaseConfidence < 0.5;
         if (this.jev && consult) {
-            const res = (await this.jev.ask(this.stepAskState(ctx), STEP_QUESTIONS));
+            const res = (await this.jev.ask(this.stepAskState(judged), STEP_QUESTIONS));
             jevLatencyMs = res.latencyMs;
             if (res.failed || res.circuitOpen) {
                 jevError = res.error ?? 'jev circuit open';

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,6 +62,36 @@ export function createGateway(jev, bounds, opts = {}) {
     });
 }
 /** `jev-opus claude [claude args…]`: gateway in-process + the normal interactive Claude Code on top of it. */
+/** Oldest Claude Code that accepts claude-opus-5-5 and per-turn effort. */
+export const MIN_CLAUDE_VERSION = '2.1.280';
+export function versionAtLeast(version, min) {
+    const a = version.split('.').map(Number), b = min.split('.').map(Number);
+    for (let i = 0; i < 3; i++)
+        if ((a[i] ?? 0) !== (b[i] ?? 0))
+            return (a[i] ?? 0) > (b[i] ?? 0);
+    return true;
+}
+/** The Claude Code that `claude` resolves to on this PATH, or an explanation of why it can't be used. */
+export function checkClaude(bin, env) {
+    let out;
+    try {
+        out = execFileSync(bin, ['--version'], { encoding: 'utf8', env, timeout: 15_000 });
+    }
+    catch {
+        return { ok: false, message: `could not run "${bin}". Install Claude Code ${MIN_CLAUDE_VERSION}+ (https://code.claude.com) or set JEV_OPUS_CLAUDE_PATH.` };
+    }
+    const version = out.match(/(\d+\.\d+\.\d+)/)?.[1];
+    if (!version)
+        return { ok: false, message: `could not read the version from "${bin} --version".` };
+    if (versionAtLeast(version, MIN_CLAUDE_VERSION))
+        return { ok: true, version };
+    let where = bin;
+    try {
+        where = execFileSync('/usr/bin/which', [bin], { encoding: 'utf8', env }).trim() || bin;
+    }
+    catch { /* keep bin */ }
+    return { ok: false, message: `"claude" on your PATH is Claude Code ${version} (${where}), which can't use Opus 5.5; ${MIN_CLAUDE_VERSION} or newer is needed. Update it (\`claude update\`, or \`brew upgrade claude-code@latest\`), remove the old copy, or set JEV_OPUS_CLAUDE_PATH to a newer one.` };
+}
 export async function launchClaude(jev, bounds, claudeArgs, trace) {
     const gateway = createGateway(jev, bounds, { trace, quiet: true });
     const baseUrl = await gateway.listen();
@@ -79,7 +109,13 @@ export async function launchClaude(jev, bounds, claudeArgs, trace) {
         });
         if (!args.some((a) => a === '--model' || a.startsWith('--model=')))
             args.unshift('--model', JEV_MODEL_ID);
-        const child = spawn(config.claudePath ?? 'claude', args, { stdio: 'inherit', env });
+        const bin = config.claudePath ?? 'claude';
+        const found = checkClaude(bin, env);
+        if (!found.ok) {
+            console.error(`jev-opus: ${found.message}`);
+            return 1;
+        }
+        const child = spawn(bin, args, { stdio: 'inherit', env });
         return await new Promise((resolve) => {
             child.on('exit', (c, sig) => resolve(c ?? (sig ? 1 : 0)));
             child.on('error', (err) => {
