@@ -29,12 +29,13 @@ export function heuristicTaskProfile(prompt: string): TaskProfile {
   }
   const hard = text.match(HARD_WORDS)?.length ?? 0;
   const stakesHits = text.match(STAKES_WORDS)?.length ?? 0;
-  const lengthScore = Math.min(1.5, text.length / 800);
+  // Length is weak evidence: pasted code or specs make simple tasks long.
+  const lengthScore = Math.min(0.75, text.length / 1600);
   const typeBase: Record<TaskType, number> = {
     chat: 0.3, factual: 0.6, writing: 1.2, code_small: 1.3, code_feature: 2.2,
-    debugging: 2.2, refactor: 2.0, architecture: 2.8, analysis: 2.0, math_logic: 2.6,
+    debugging: 1.6, refactor: 2.0, architecture: 2.8, analysis: 2.0, math_logic: 2.6,
   };
-  const difficulty = Math.min(4, typeBase[taskType] + lengthScore + 0.5 * hard);
+  const difficulty = Math.min(4, typeBase[taskType] + lengthScore + 0.7 * hard);
   return {
     taskType,
     typeConfidence: 0.5,

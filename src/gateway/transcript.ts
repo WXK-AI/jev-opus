@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isEffort, type Effort } from '../effort.ts';
-import { describeToolInput, looksFailed, stringifyResult } from '../claude/describe.ts';
+import { describeToolInput, looksFailed, stringifyResult, testRunner } from '../claude/describe.ts';
 import type { ToolCallSummary } from '../router/types.ts';
 
 /**
@@ -194,6 +194,7 @@ export function lastToolRound(messages: readonly Message[]): { note: string; bat
     batch.push({
       tool: b.name ?? 'tool',
       summary: describeToolInput(b.name ?? '', b.input),
+      runner: testRunner(b.name ?? '', b.input),
       failed: r?.is_error === true || looksFailed(b.name ?? '', text),
       result: text.slice(0, 600),
     });

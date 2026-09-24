@@ -1,5 +1,5 @@
 import { query as sdkQuery, } from '@anthropic-ai/claude-agent-sdk';
-import { describeToolInput, looksFailed, stringifyResult } from './describe.js';
+import { describeToolInput, looksFailed, stringifyResult, testRunner } from './describe.js';
 /** Push-driven AsyncIterable feeding user prompts into Claude Code's streaming input. */
 class InputQueue {
     items = [];
@@ -332,6 +332,7 @@ export class JevOpusSession {
             return {
                 tool: c.tool_name,
                 summary: describeToolInput(c.tool_name, c.tool_input),
+                runner: testRunner(c.tool_name, c.tool_input),
                 failed: error !== undefined || looksFailed(c.tool_name, c.tool_response),
                 result: error ?? clip(stringifyResult(c.tool_response), 600),
             };

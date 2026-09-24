@@ -422,3 +422,47 @@ test('router snapshots hold hashes only: no command text or tool output', async 
   assert.ok(snap.includes('"issues":[{'), 'the issue is tracked');
   for (const leak of ['SECRET123', 'curl', 'npm test', 'secret-file-contents', 'Bash:']) assert.ok(!snap.includes(leak), `snapshot leaks ${leak}`);
 });
+
+test('once the failing check passes, the escalation is released and effort steps down one level', async () => {
+  const { EffortRouter } = await import('../src/router/router.ts');
+  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
+  const task = await r.routeTask('the date tests fail, fix them', null);
+  assert.equal(task.effort, 'medium');
+  const ctx = (current: Effort, batch: Array<{ tool: string; summary: string; failed: boolean; result: string }>, turn: number) => ({
+    prompt: 'the date tests fail, fix them', profile: task.profile!, turn, current, consecutiveFailures: 0,
+    assistantNote: '', trajectory: [], lastBatch: batch,
+  });
+  const fail = await r.routeStep(ctx('medium', [{ tool: 'Bash', summary: 'npm test', failed: true, result: 'not ok 1 - isLeapYear expected true actual false' }], 1));
+  assert.equal(fail.effort, 'high', 'failure escalates');
+  // The very next batch fixes it and the same check passes: no hold, one level down.
+  const pass = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: "sed -i '' 's/x/y/' dates.js && npm test", failed: false, result: '# pass 8 # fail 0' }, { tool: 'Bash', summary: 'npm test 2>&1 | tail -5', failed: false, result: '# pass 8' }], 2));
+  assert.equal(pass.effort, 'medium', 'released and stepped down one level, not straight to low');
+  assert.ok(pass.reasons.some((x) => x.includes('release hold')));
+});
+
+test('a successful read while the failure is still open does not release the escalation', async () => {
+  const { EffortRouter } = await import('../src/router/router.ts');
+  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
+  const task = await r.routeTask('the date tests fail, fix them', null);
+  const ctx = (current: Effort, batch: Array<{ tool: string; summary: string; failed: boolean; result: string }>, turn: number) => ({
+    prompt: 'the date tests fail, fix them', profile: task.profile!, turn, current, consecutiveFailures: 0,
+    assistantNote: '', trajectory: [], lastBatch: batch,
+  });
+  await r.routeStep(ctx('medium', [{ tool: 'Bash', summary: 'npm test', failed: true, result: 'not ok 1 - isLeapYear' }], 1));
+  const read = await r.routeStep(ctx('high', [{ tool: 'Read', summary: 'dates.js', failed: false, result: 'export function isLeapYear' }], 2));
+  assert.equal(read.effort, 'high');
+});
+
+test('live repro: a different command that reruns the same suite and passes resolves the failure', async () => {
+  const { EffortRouter } = await import('../src/router/router.ts');
+  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
+  const task = await r.routeTask('the date tests fail, fix them', null);
+  const ctx = (current: Effort, batch: Array<{ tool: string; summary: string; failed: boolean; result: string; runner?: string }>, turn: number) => ({
+    prompt: 'the date tests fail, fix them', profile: task.profile!, turn, current, consecutiveFailures: 0,
+    assistantNote: '', trajectory: [], lastBatch: batch,
+  });
+  const fail = await r.routeStep(ctx('medium', [{ tool: 'Bash', summary: "cat > package.json <<'EOF' {\"type\":\"module\"…", failed: true, result: 'not ok 1 - isLeapYear', runner: 'npm test' }], 1));
+  assert.equal(fail.effort, 'high');
+  const pass = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: "sed -i '' -e 's/return y % 4…' dates.js && npm test", failed: false, result: '# pass 3 # fail 0', runner: 'npm test' }], 2));
+  assert.equal(pass.effort, 'medium', 'same suite passing resolves the issue and releases the escalation');
+});

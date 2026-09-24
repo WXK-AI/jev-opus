@@ -41,6 +41,8 @@ export interface ToolCallSummary {
   failed: boolean;
   /** truncated result or error text */
   result: string;
+  /** test/check runner found in the FULL command (e.g. "npm test"), so any later run of the same suite matches */
+  runner?: string;
 }
 
 export interface StepContext {

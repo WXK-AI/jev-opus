@@ -3,3 +3,4 @@ export declare function describeToolInput(tool: string, input: unknown): string;
 export declare function stringifyResult(response: unknown): string;
 /** Best-effort failure detection for a successful-looking tool response. */
 export declare function looksFailed(tool: string, response: unknown): boolean;
+export declare function testRunner(tool: string, input: unknown): string | undefined;

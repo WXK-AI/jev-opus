@@ -80,7 +80,7 @@ test('UI settings preserve existing hooks, permissions, status line, and caller 
     assert.deepEqual(settings.permissions, original.permissions);
     assert.deepEqual(settings.statusLine, original.statusLine);
     assert.deepEqual(settings.hooks.PreToolUse[0], original.hooks.PreToolUse[0]);
-    assert.equal(settings.hooks.PreToolUse.length, 2);
+    assert.equal(settings.hooks.PreToolUse.length, 1, 'no tool-notice hook by default: only the caller\'s own');
     assert.equal(settings.hooks.MessageDisplay[0].hooks[0].timeout, 1);
     assert.equal(result.at(-1), '-c');
   }
@@ -101,4 +101,20 @@ test('settings files are merged in memory without changing the original file', (
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('a text badge shows every level since the previous badge', () => {
+  const display = new EffortDisplay();
+  const step = (effort: EffortDecision['effort'], previous: EffortDecision['effort']): EffortDecision => ({ ...decision, effort, previous, changed: effort !== previous });
+  display.record('s', 'main', step('medium', 'low')); // task start, tool-only step
+  display.record('s', 'main', step('high', 'medium')); // failure, tool-only step
+  display.record('s', 'main', step('high', 'high')); // unchanged
+  display.record('s', 'main', step('medium', 'high')); // tests pass
+  assert.match(JSON.stringify(display.handle(message())), /Jev · LOW → MEDIUM → HIGH → MEDIUM · diagnosing/);
+  assert.match(JSON.stringify(display.handle({ ...message(), message_id: 'm2' })), /Jev · MEDIUM · diagnosing/, 'next badge starts from the level in force');
+});
+
+test('tool notices are opt-in', () => {
+  assert.deepEqual(Object.keys(inlineEffortSettings('http://x/h').hooks!), ['MessageDisplay']);
+  assert.deepEqual(Object.keys(inlineEffortSettings('http://x/h', { toolNotices: true }).hooks!).sort(), ['MessageDisplay', 'PreToolUse']);
 });

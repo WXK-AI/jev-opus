@@ -17,6 +17,8 @@ export interface Issue {
     command: string;
     /** readable command, in memory only for the Jev prompt; never serialized */
     label?: string;
+    /** hash of the test/check suite that failed; any later passing run of that suite clears the issue */
+    runner?: string;
     /** failure is an environment blocker (network, permissions, missing infra…) */
     environment: boolean;
     /** batches in which this fingerprint has been observed failing */

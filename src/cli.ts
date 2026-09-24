@@ -186,7 +186,7 @@ async function gateway(jev: JevClient | null, bounds: { min: Effort; max: Effort
   for (const [k, v] of Object.entries(env)) console.log(c.dim(`  ${k}=${v}`));
   console.log(c.dim(`then pick "Opus 5.5 · Jev" in /model (or --model ${JEV_MODEL_ID}). Ctrl-C to stop.`));
   console.log(c.dim('For inline effort badges, merge these session hooks into your Claude Code settings (valid while this gateway runs):'));
-  console.log(JSON.stringify(inlineEffortSettings(url + gw.displayHookPath), null, 2));
+  console.log(JSON.stringify(inlineEffortSettings(url + gw.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES === '1' }), null, 2));
   await new Promise<void>((resolve) => process.once('SIGINT', resolve));
   await gw.close();
 }

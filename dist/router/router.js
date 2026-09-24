@@ -116,8 +116,15 @@ export class EffortRouter {
             environmentOnly: outcome.environmentOnly,
             routineOk,
         });
+        // A failure that justified escalation now passes, and nothing else is open:
+        // the escalation did its job. That is positive evidence for stepping down,
+        // and it releases the post-raise hold (the hold only exists to give an
+        // escalation time to work).
+        const recovered = outcome.resolved.some((i) => !i.environment) && reasoning.length === 0;
+        if (recovered)
+            this.hold = 0;
         const local = heuristicStepSignals(ctx, { ignoreFailures: outcome.environmentOnly });
-        const localRoutine = local.phase !== 'diagnosing';
+        const localRoutine = local.phase !== 'diagnosing' || recovered;
         let signals = local;
         let routineOk = localRoutine;
         let target = stepTarget(this.base, local, evidence(routineOk), ctx.current);
@@ -153,9 +160,10 @@ export class EffortRouter {
                     source = 'jev';
                     // Routine evidence from Jev needs a confident, valid answer; missing
                     // or weak evidence never justifies a downgrade on its own.
-                    routineOk = phased && phased.confidence >= 0.6 ? phased.choice !== 'diagnosing'
-                        : scored && scored.confidence >= 0.6 ? scored.score < 2.25
-                            : localRoutine;
+                    routineOk = recovered ? true
+                        : phased && phased.confidence >= 0.6 ? phased.choice !== 'diagnosing'
+                            : scored && scored.confidence >= 0.6 ? scored.score < 2.25
+                                : localRoutine;
                 }
                 else {
                     jevError = 'jev returned no usable answers';
@@ -168,7 +176,7 @@ export class EffortRouter {
         const h = applyHysteresis(ctx.current, target.effort, this.hold, signals.phase === 'finishing');
         this.hold = h.hold;
         const effort = clampEffort(h.effort, bounds.min, bounds.max);
-        const reasons = [...target.reasons];
+        const reasons = recovered ? ['failing check now passes → release hold', ...target.reasons] : [...target.reasons];
         if (h.note)
             reasons.push(h.note);
         if (effort !== h.effort)

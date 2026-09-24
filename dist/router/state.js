@@ -93,14 +93,18 @@ export function reduceBatch(state, batch, effort) {
                     outcome.repeated.push(issue);
             }
             else {
-                issue = { fingerprint: fp, command, label: readable.slice(0, 80), environment, attempts: 1, tried: [effort], lastSeen: clock };
+                issue = {
+                    fingerprint: fp, command, label: readable.slice(0, 80), environment, attempts: 1, tried: [effort], lastSeen: clock,
+                    ...(call.runner ? { runner: identity(`runner:${call.runner}`) } : {}),
+                };
                 issues.push(issue);
                 outcome.newIssues.push(issue);
             }
         }
         else {
+            const runner = call.runner ? identity(`runner:${call.runner}`) : undefined;
             for (const i of issues) {
-                if (i.command === command && !cleared.has(i)) {
+                if ((i.command === command || (runner !== undefined && i.runner === runner)) && !cleared.has(i)) {
                     cleared.add(i);
                     outcome.resolved.push(i);
                 }
@@ -137,6 +141,7 @@ export function reviveCore(raw) {
                 attempts: typeof i.attempts === 'number' && Number.isFinite(i.attempts) ? Math.max(1, Math.floor(i.attempts)) : 1,
                 tried: Array.isArray(i.tried) ? i.tried.filter(isEffort) : [],
                 lastSeen: typeof i.lastSeen === 'number' && Number.isFinite(i.lastSeen) ? Math.floor(i.lastSeen) : clock,
+                ...(typeof i.runner === 'string' ? { runner: i.runner } : {}),
             });
         }
     }

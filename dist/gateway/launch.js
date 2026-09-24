@@ -63,7 +63,7 @@ export async function launchClaude(jev, bounds, claudeArgs, trace) {
         const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
         const command = `${quote(process.execPath)} ${quote(cli)} statusline`;
         const args = withGatewaySettings(claudeArgs, {
-            ...(process.env.JEV_OPUS_NO_INLINE_EFFORT === '1' ? {} : inlineEffortSettings(baseUrl + gateway.displayHookPath)),
+            ...(process.env.JEV_OPUS_NO_INLINE_EFFORT === '1' ? {} : inlineEffortSettings(baseUrl + gateway.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES === '1' })),
             ...(process.env.JEV_OPUS_NO_STATUSLINE === '1' ? {} : { statusLine: { type: 'command', command } }),
         });
         if (!args.some((a) => a === '--model' || a.startsWith('--model=')))

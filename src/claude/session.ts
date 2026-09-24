@@ -13,7 +13,7 @@ import {
 import type { Effort } from '../effort.ts';
 import type { EffortRouter } from '../router/router.ts';
 import type { EffortDecision, TaskProfile, ToolCallSummary } from '../router/types.ts';
-import { describeToolInput, looksFailed, stringifyResult } from './describe.ts';
+import { describeToolInput, looksFailed, stringifyResult, testRunner } from './describe.ts';
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
 
@@ -442,6 +442,7 @@ export class JevOpusSession {
       return {
         tool: c.tool_name,
         summary: describeToolInput(c.tool_name, c.tool_input),
+        runner: testRunner(c.tool_name, c.tool_input),
         failed: error !== undefined || looksFailed(c.tool_name, c.tool_response),
         result: error ?? clip(stringifyResult(c.tool_response), 600),
       };

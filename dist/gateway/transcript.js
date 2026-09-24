@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isEffort } from '../effort.js';
-import { describeToolInput, looksFailed, stringifyResult } from '../claude/describe.js';
+import { describeToolInput, looksFailed, stringifyResult, testRunner } from '../claude/describe.js';
 /**
  * Pure helpers for rewriting Claude Code's /v1/messages requests.
  *
@@ -181,6 +181,7 @@ export function lastToolRound(messages) {
         batch.push({
             tool: b.name ?? 'tool',
             summary: describeToolInput(b.name ?? '', b.input),
+            runner: testRunner(b.name ?? '', b.input),
             failed: r?.is_error === true || looksFailed(b.name ?? '', text),
             result: text.slice(0, 600),
         });

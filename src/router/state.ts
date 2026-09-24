@@ -20,6 +20,8 @@ export interface Issue {
   command: string;
   /** readable command, in memory only for the Jev prompt; never serialized */
   label?: string;
+  /** hash of the test/check suite that failed; any later passing run of that suite clears the issue */
+  runner?: string;
   /** failure is an environment blocker (network, permissions, missing infra…) */
   environment: boolean;
   /** batches in which this fingerprint has been observed failing */
@@ -158,13 +160,17 @@ export function reduceBatch(
         if (!issue.tried.includes(effort)) issue.tried.push(effort);
         if (!outcome.repeated.includes(issue)) outcome.repeated.push(issue);
       } else {
-        issue = { fingerprint: fp, command, label: readable.slice(0, 80), environment, attempts: 1, tried: [effort], lastSeen: clock };
+        issue = {
+          fingerprint: fp, command, label: readable.slice(0, 80), environment, attempts: 1, tried: [effort], lastSeen: clock,
+          ...(call.runner ? { runner: identity(`runner:${call.runner}`) } : {}),
+        };
         issues.push(issue);
         outcome.newIssues.push(issue);
       }
     } else {
+      const runner = call.runner ? identity(`runner:${call.runner}`) : undefined;
       for (const i of issues) {
-        if (i.command === command && !cleared.has(i)) {
+        if ((i.command === command || (runner !== undefined && i.runner === runner)) && !cleared.has(i)) {
           cleared.add(i);
           outcome.resolved.push(i);
         }
@@ -202,6 +208,7 @@ export function reviveCore(raw: unknown): CoreState | null {
         attempts: typeof i.attempts === 'number' && Number.isFinite(i.attempts) ? Math.max(1, Math.floor(i.attempts)) : 1,
         tried: Array.isArray(i.tried) ? i.tried.filter(isEffort) : [],
         lastSeen: typeof i.lastSeen === 'number' && Number.isFinite(i.lastSeen) ? Math.floor(i.lastSeen) : clock,
+        ...(typeof i.runner === 'string' ? { runner: i.runner } : {}),
       });
     }
   }

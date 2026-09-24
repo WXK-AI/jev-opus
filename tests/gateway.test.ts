@@ -112,7 +112,9 @@ test('gateway: routes jev model, replays insertions byte-identically, passes sec
     await post(base, body(m3));
     const sent3 = up.seen.at(-1)!.body!.messages as Message[];
     assert.deepEqual(sent3.slice(0, sent2.length), sent2, 'prefix identical again');
-    assert.equal(sent3.length, sent2.length + 2, 'hysteresis holds high: no new insertion');
+    // The failing npm test now passes: the escalation is released and effort steps down one level.
+    assert.equal(sent3.length, sent2.length + 3, 'one new statement for the step down');
+    assert.deepEqual(sent3.at(-2), { role: 'system', content: [], output_config: { effort: 'medium' } }, 'high → medium once the check passes');
 
     // /rewind with a *different* tool result at the same index is a new boundary, not a retry:
     // it re-routes from the common ancestor, the abandoned high statement is dropped,

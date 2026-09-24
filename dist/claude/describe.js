@@ -53,3 +53,34 @@ export function looksFailed(tool, response) {
         return false;
     return FAIL_TEXT.test(stringifyResult(response).slice(0, 4000));
 }
+/**
+ * The test or check suite a shell command runs, read from the FULL command
+ * (summaries are clipped, and Claude often chains setup, fixes and the test
+ * run into one command). The last runner in the command wins.
+ */
+const RUNNERS = [
+    [/\b(npm|pnpm|yarn|bun) (run )?test\b/, 'npm test'],
+    [/\bnode --test\b/, 'node --test'],
+    [/\bnpx (vitest|jest|mocha|playwright test)\b|\b(vitest|jest|mocha)\b/, 'js tests'],
+    [/\bpytest\b|python3? -m (pytest|unittest)\b/, 'pytest'],
+    [/\bcargo (test|check|build|clippy)\b/, 'cargo'],
+    [/\bgo (test|vet|build)\b/, 'go'],
+    [/\b(npx )?tsc\b|\bnpm run (typecheck|build|lint)\b/, 'typecheck/build'],
+    [/\bmake (test|check)\b/, 'make test'],
+    [/\b(mvn|gradle|\.\/gradlew) (test|check|build)\b/, 'jvm'],
+    [/\b(rspec|bundle exec rspec|rake test)\b/, 'ruby tests'],
+    [/\bswift test\b|\bxcodebuild test\b/, 'swift tests'],
+];
+export function testRunner(tool, input) {
+    if (tool !== 'Bash')
+        return undefined;
+    const cmd = String((input ?? {}).command ?? '').toLowerCase();
+    let best;
+    for (const [re, name] of RUNNERS) {
+        for (const m of cmd.matchAll(new RegExp(re.source, 'g'))) {
+            if (!best || m.index >= best.at)
+                best = { at: m.index, name };
+        }
+    }
+    return best?.name;
+}
