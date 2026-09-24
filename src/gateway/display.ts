@@ -4,7 +4,7 @@ import type { JournalAnnotation } from './journal.ts';
 
 export type DisplayMode = 'every-response' | 'changes' | 'off';
 export function displayMode(value = process.env.JEV_OPUS_DISPLAY): DisplayMode {
-  return value === 'changes' || value === 'off' ? value : 'every-response';
+  return value === 'every-response' || value === 'off' ? value : 'changes';
 }
 
 /** Plain-language labels for the policy's internal reason strings, most important first. */
@@ -60,7 +60,7 @@ export class EffortDisplay {
   private readonly showDecisionIds: boolean;
   private readonly onAnnotation?: (key: string, event: JournalAnnotation) => void;
 
-  constructor(maxEntries = 256, mode: DisplayMode = 'every-response', onAnnotation?: (key: string, event: JournalAnnotation) => void, showDecisionIds = process.env.JEV_OPUS_SHOW_DECISION_IDS === '1') {
+  constructor(maxEntries = 256, mode: DisplayMode = 'changes', onAnnotation?: (key: string, event: JournalAnnotation) => void, showDecisionIds = process.env.JEV_OPUS_SHOW_DECISION_IDS === '1') {
     this.maxEntries = maxEntries;
     this.mode = mode;
     this.showDecisionIds = showDecisionIds;

@@ -55,22 +55,29 @@ This opens the regular interactive Claude Code, the same interface, tools and ap
 
 ### Seeing the effort change
 
-Every assistant text response gets a compact visual effort badge by default. When the selected level changes, the badge shows the transition and routing reason:
+By default (`changes` mode) you see effort in two places:
 
-```text
-◆ Jev · MEDIUM → HIGH · failing checks
-◆ Jev · HIGH → MEDIUM · matching checks passed
-```
+- **Status line (live).** It shows the current prompt's whole path as it happens, and resets at your next prompt:
+  ```
+  ◆ Jev · MEDIUM · debugging
+  ◆ Jev · medium → HIGH · diagnosing
+  ◆ Jev · medium → high → MEDIUM · verifying
+  ```
+- **Badges above Claude's text.** A badge appears on the first response of each prompt and wherever the level changed, with the reason for the change:
+  ```text
+  ◆ Jev · MEDIUM → HIGH · failing checks
+  ◆ Jev · HIGH → MEDIUM · matching checks passed
+  ```
 
-Tool-only responses receive one native notice at the first tool call, including parallel tool batches. Claude Code controls its placement and prefixes it with `PreToolUse:Bash says:`. The footer still shows the current prompt's live effort path. Badges describe the **selected/requested setting**, not a measurement of the model's internal reasoning.
+If a change happens on a step where Claude writes no text, Claude Code only allows a notice at the tool call, and it adds the prefix `PreToolUse:Bash says:` itself. Badges show the effort Jev **selected**; they don't measure how much the model actually reasoned.
 
 Display options, set before the command or in `~/.config/jev-opus/.env`:
 
-- `JEV_OPUS_DISPLAY=every-response` is the default. Use `changes` for only the first response of a prompt and effort changes, or `off` for no inline annotations.
-- `JEV_OPUS_SHOW_DECISION_IDS=1` adds short `D-…` references to badges for debugging. IDs are hidden by default and always retained in audit logs.
-- `JEV_OPUS_TOOL_NOTICES=0` disables tool notices; they are now enabled by default.
-- `JEV_OPUS_NARRATION=1` optionally asks Claude for a short line before tool calls. It changes model behavior, adds output tokens, and cannot guarantee a visible line; it remains off by default.
-- `JEV_OPUS_NO_INLINE_EFFORT=1` disables launch-time hooks. `JEV_OPUS_NO_STATUSLINE=1` disables the footer.
+- `JEV_OPUS_DISPLAY=changes` is the default. `every-response` badges every response, including a notice on every tool-only step. `off` shows no inline annotations (the status line stays).
+- `JEV_OPUS_TOOL_NOTICES=0` turns off the tool-call notices.
+- `JEV_OPUS_SHOW_DECISION_IDS=1` adds short `D-…` references to badges, matching `jev-opus audit`.
+- `JEV_OPUS_NARRATION=1` asks Claude for a short line before each tool call. It adds output tokens, and Opus 5.5 often hides these lines, so it's off by default.
+- `JEV_OPUS_NO_INLINE_EFFORT=1` turns off all badges and notices; `JEV_OPUS_NO_STATUSLINE=1` turns off the status line.
 
 [MessageDisplay](https://code.claude.com/docs/en/hooks#messagedisplay) annotations only change the display; they do not enter the stored model conversation. Tool-only responses do not trigger that hook, so native tool notices are the fallback. Display-message UUIDs differ from provider message IDs: audit records explicitly label text annotations as associated with the latest session decision, while tool annotations use the generating tool ID when available. The returned badge is logged; successful rendering or user visibility is not claimed.
 

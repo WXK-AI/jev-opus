@@ -1,5 +1,5 @@
 export function displayMode(value = process.env.JEV_OPUS_DISPLAY) {
-    return value === 'changes' || value === 'off' ? value : 'every-response';
+    return value === 'every-response' || value === 'off' ? value : 'changes';
 }
 /** Plain-language labels for the policy's internal reason strings, most important first. */
 const REASON_LABELS = [
@@ -37,7 +37,7 @@ export class EffortDisplay {
     mode;
     showDecisionIds;
     onAnnotation;
-    constructor(maxEntries = 256, mode = 'every-response', onAnnotation, showDecisionIds = process.env.JEV_OPUS_SHOW_DECISION_IDS === '1') {
+    constructor(maxEntries = 256, mode = 'changes', onAnnotation, showDecisionIds = process.env.JEV_OPUS_SHOW_DECISION_IDS === '1') {
         this.maxEntries = maxEntries;
         this.mode = mode;
         this.showDecisionIds = showDecisionIds;
