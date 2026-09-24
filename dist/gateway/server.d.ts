@@ -8,6 +8,14 @@ import type { EffortDecision } from '../router/types.ts';
  * Requests for that model get their prefix stripped and a Jev-chosen effort
  * inserted as a per-message effort statement. Everything else passes through
  * byte-for-byte. Credentials are forwarded unchanged and never logged.
+ *
+ * Routing decisions are serialized per conversation branch and single-flighted
+ * by request fingerprint: an identical request awaits and reuses the prepared
+ * transformation instead of routing twice. Every prepared transformation is
+ * written to a durable JSONL journal before it is forwarded upstream, so a
+ * thread-cache eviction or a gateway restart replays exactly the statements the
+ * upstream model saw. A bounded copy of each routed response is parsed for
+ * usage and journaled against the decision ID.
  */
 export interface GatewayOptions {
     jev: JevLike | null;
@@ -16,6 +24,8 @@ export interface GatewayOptions {
     port?: number;
     host?: string;
     statusDir?: string;
+    /** durable journal directory; without it the gateway keeps no journal (tests) */
+    journalDir?: string;
     onDecision?: (session: string, d: EffortDecision) => void;
     onNotice?: (message: string) => void;
     trace?: (event: Record<string, unknown>) => void;
@@ -27,14 +37,44 @@ export declare class JevGateway {
     private readonly display;
     private readonly opts;
     private readonly upstream;
+    private readonly journal;
     private readonly threads;
     private server;
     constructor(opts: GatewayOptions);
     listen(): Promise<string>;
     close(): Promise<void>;
     private handle;
-    /** Decide effort for this request and return the messages with all insertions replayed. */
+    /**
+     * Tee a bounded copy of a routed response for usage telemetry. The stream
+     * pipes to the client unchanged — listeners only observe the bytes that flow,
+     * so backpressure is preserved. The final journal status is `completed` when
+     * the stream ends cleanly under an OK status, `failed` on an upstream error
+     * status or a stream error, and `unknown` when the client went away first
+     * (acceptance unknown).
+     */
+    private attachTelemetry;
+    /**
+     * Single-flight per branch: an identical request (same boundary fingerprint)
+     * awaits the prepared transformation; anything else serializes on the
+     * thread's queue and is decided exactly once.
+     */
     private route;
+    /** Apply a prepared transformation to a request's messages (retry-safe). */
+    private replay;
+    /**
+     * Runs inside the thread's queue: restores the common-ancestor state when the
+     * request branched off earlier history, decides effort, journals the prepared
+     * transformation BEFORE it is forwarded upstream, and returns it.
+     */
+    private decide;
+    private journalRecord;
+    /**
+     * Rewind thread state to a journaled decision: restore the opaque router
+     * snapshot and rebuild the deterministic fields (prompt, profile, counters,
+     * trajectory) from the surviving branch, without ever storing prompt text.
+     */
+    private restore;
+    private journalAppend;
     private thread;
     private writeStatus;
 }

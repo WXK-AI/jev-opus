@@ -11,6 +11,7 @@ import { withGatewaySettings } from './settings.js';
 export const JEV_MODEL_ID = 'jev/claude-opus-5-5';
 export const STATUS_DIR = path.join(CONFIG_DIR, 'status');
 export const GATEWAY_LOG = path.join(CONFIG_DIR, 'gateway.log');
+export const JOURNAL_DIR = path.join(CONFIG_DIR, 'journal');
 /** Env that makes Claude Code route through the gateway and list "Opus 5.5 · Jev" in /model. */
 export function gatewayClientEnv(baseUrl) {
     return {
@@ -35,6 +36,7 @@ export function createGateway(jev, bounds, opts = {}) {
         bounds,
         port: opts.port,
         statusDir: STATUS_DIR,
+        journalDir: JOURNAL_DIR,
         upstream: process.env.JEV_GATEWAY_UPSTREAM || undefined,
         trace: opts.trace,
         onDecision: (session, d) => {

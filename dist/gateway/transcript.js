@@ -23,17 +23,36 @@ export function stripJevModel(model) {
  * Canonical form for prefix comparison: Claude Code moves `cache_control`
  * breakpoints between requests and may resend string content as a text-block
  * array (or back). The API renders both identically, so neither counts as a change.
+ *
+ * `cache_control` is stripped only on content blocks — objects sitting inside a
+ * `content` array (text/image/tool_result/tool_use/document/…). Tool arguments
+ * (`tool_use.input`, and anything nested below it) are compared verbatim: a key
+ * named `cache_control` there is real input, not a breakpoint hint.
  */
 export function canonical(value) {
+    return canonicalValue(value, false, false);
+}
+function canonicalValue(value, asBlock, inArgs) {
     if (Array.isArray(value))
-        return value.map(canonical);
+        return value.map((v) => canonicalValue(v, false, inArgs));
     if (!value || typeof value !== 'object')
         return value;
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-        if (k === 'cache_control')
+        if (!inArgs && asBlock && k === 'cache_control')
             continue;
-        out[k] = k === 'content' && typeof v === 'string' ? [{ type: 'text', text: v }] : canonical(v);
+        if (!inArgs && k === 'content' && typeof v === 'string') {
+            out[k] = [{ type: 'text', text: v }];
+        }
+        else if (!inArgs && k === 'content' && Array.isArray(v)) {
+            out[k] = v.map((b) => canonicalValue(b, true, false));
+        }
+        else if (asBlock && k === 'input') {
+            out[k] = canonicalValue(v, false, true);
+        }
+        else {
+            out[k] = canonicalValue(v, false, inArgs);
+        }
     }
     return out;
 }
@@ -46,6 +65,16 @@ export function prefixHashes(messages) {
         out.push(h);
     }
     return out;
+}
+/**
+ * Identity of a routing boundary: the rolling prefix hash of the canonical
+ * transcript through the last user message (`hashes[lastUser + 1]`) plus the
+ * configuration that can change the decision — the (stripped) model and the
+ * top-level output_config. Statements trailing the last user turn are excluded.
+ */
+export function requestFingerprint(boundaryHash, body) {
+    const config = canonical({ model: body.model ?? null, output_config: body.output_config ?? null });
+    return createHash('sha256').update(boundaryHash).update(JSON.stringify(config)).digest('hex');
 }
 export function lastIndexOfRole(messages, role) {
     for (let i = messages.length - 1; i >= 0; i--)

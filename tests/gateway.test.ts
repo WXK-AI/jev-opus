@@ -81,6 +81,7 @@ test('gateway: routes jev model, replays insertions byte-identically, passes sec
     { task_type: { choice: 'debugging', confidence: 0.9 }, difficulty: { score: 1.0 }, stakes: { noul: 0.1 } }, // → medium floor
     { phase: { choice: 'diagnosing', confidence: 0.9 }, step_difficulty: { score: 3.5 }, stuck: { noul: 0.1 } }, // → high
     { phase: { choice: 'verifying', confidence: 0.9 }, step_difficulty: { score: 1 }, stuck: { noul: 0.1 } }, // hold high
+    { phase: { choice: 'exploring', confidence: 0.9 }, step_difficulty: { score: 0.5 }, stuck: { noul: 0.1 } }, // rewound step → low
   ]);
   const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
   const base = await gw.listen();
@@ -113,12 +114,16 @@ test('gateway: routes jev model, replays insertions byte-identically, passes sec
     assert.deepEqual(sent3.slice(0, sent2.length), sent2, 'prefix identical again');
     assert.equal(sent3.length, sent2.length + 2, 'hysteresis holds high: no new insertion');
 
-    // /rewind to before the failing step: stale insertion is dropped, new branch re-routed
+    // /rewind with a *different* tool result at the same index is a new boundary, not a retry:
+    // it re-routes from the common ancestor, the abandoned high statement is dropped,
+    // and the insertion on the shared prefix survives.
     const m4 = [...m1, a('t9', 'ls'), r('t9', 'dates.js')];
     await post(base, body(m4));
+    assert.equal(jev.calls, 4, 'changed history routes a fresh decision');
     const sent4 = up.seen.at(-1)!.body!.messages as Message[];
-    assert.equal(sent4.filter((m) => m.role === 'system').some((m) => m.output_config?.effort === 'high' && sent4.indexOf(m) === 2), false);
     assert.deepEqual(sent4[0], sent1[0], 'insertion on the shared prefix survives');
+    assert.deepEqual(sent4[3], { role: 'system', content: [], output_config: { effort: 'low' } }, 'the new branch states its own level before the changed result');
+    assert.equal(sent4.filter((m) => m.role === 'system' && m.output_config?.effort === 'high').length, 0, 'the abandoned high statement is gone');
   } finally {
     await gw.close();
     up.close();

@@ -33,10 +33,25 @@ export declare function stripJevModel(model: string): string;
  * Canonical form for prefix comparison: Claude Code moves `cache_control`
  * breakpoints between requests and may resend string content as a text-block
  * array (or back). The API renders both identically, so neither counts as a change.
+ *
+ * `cache_control` is stripped only on content blocks — objects sitting inside a
+ * `content` array (text/image/tool_result/tool_use/document/…). Tool arguments
+ * (`tool_use.input`, and anything nested below it) are compared verbatim: a key
+ * named `cache_control` there is real input, not a breakpoint hint.
  */
 export declare function canonical(value: unknown): unknown;
 /** prefixHashes[i] = hash of canonical messages[0..i); length = messages.length + 1 */
 export declare function prefixHashes(messages: readonly unknown[]): string[];
+/**
+ * Identity of a routing boundary: the rolling prefix hash of the canonical
+ * transcript through the last user message (`hashes[lastUser + 1]`) plus the
+ * configuration that can change the decision — the (stripped) model and the
+ * top-level output_config. Statements trailing the last user turn are excluded.
+ */
+export declare function requestFingerprint(boundaryHash: string, body: {
+    model?: unknown;
+    output_config?: unknown;
+}): string;
 export declare function lastIndexOfRole(messages: readonly Message[], role: string): number;
 /** Latest effort statement Claude Code itself put in the history (its /effort level). */
 export declare function clientEffort(messages: readonly Message[]): {

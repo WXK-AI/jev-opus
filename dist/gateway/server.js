@@ -3,23 +3,31 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { STEP_SET_VERSION, TASK_SET_VERSION } from '../router/questions.js';
 import { EffortRouter } from '../router/router.js';
 import { isEffort } from '../effort.js';
 import { EffortDisplay } from './display.js';
-import { addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt, lastToolRound, prefixHashes, stripJevModel, userText, } from './transcript.js';
+import { Journal } from './journal.js';
+import { addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt, lastToolRound, prefixHashes, requestFingerprint, stripJevModel, userText, } from './transcript.js';
 const HOP_BY_HOP = new Set(['host', 'connection', 'content-length', 'accept-encoding', 'transfer-encoding', 'keep-alive', 'proxy-connection', 'upgrade']);
 const DROP_RESPONSE = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive']);
+const POLICY_VERSION = `gateway.v1+${TASK_SET_VERSION}+${STEP_SET_VERSION}`;
+/** cap on the tee'd copy of a routed response kept for usage parsing */
+const TELEMETRY_CAP = 256 * 1024;
+const PREPARED_CAP = 512;
 export class JevGateway {
     /** Ephemeral local endpoint; hook payloads are never forwarded upstream. */
     displayHookPath = `/_jev/hooks/${randomUUID()}`;
     display = new EffortDisplay();
     opts;
     upstream;
+    journal;
     threads = new Map();
     server = null;
     constructor(opts) {
         this.opts = opts;
         this.upstream = (opts.upstream ?? 'https://api.anthropic.com').replace(/\/+$/, '');
+        this.journal = opts.journalDir ? new Journal(opts.journalDir) : null;
     }
     async listen() {
         this.server = http.createServer((req, res) => {
@@ -74,6 +82,7 @@ export class JevGateway {
         }
         const url = req.url ?? '/';
         const pathname = url.split('?')[0];
+        let telem = null;
         if (req.method === 'POST' && body && (pathname === '/v1/messages' || pathname === '/v1/messages/count_tokens')) {
             let parsed = null;
             try {
@@ -93,7 +102,10 @@ export class JevGateway {
             if (parsed && isJevModel(parsed.model)) {
                 parsed.model = stripJevModel(parsed.model);
                 if (pathname === '/v1/messages' && Array.isArray(parsed.messages) && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
-                    parsed.messages = await this.route(headers, parsed);
+                    const routed = await this.route(headers, parsed);
+                    parsed.messages = routed.messages;
+                    if (routed.decisionId && routed.key)
+                        telem = { key: routed.key, decisionId: routed.decisionId };
                     headers['anthropic-beta'] = addBeta(headers['anthropic-beta']);
                 }
                 body = Buffer.from(JSON.stringify(parsed));
@@ -103,16 +115,27 @@ export class JevGateway {
                 this.display.clear(headers['x-claude-code-session-id'] ?? 'no-session', headers['x-claude-code-agent-id'] ?? 'main');
             }
         }
+        // The request is on its way: mark the prepared decision as sent before dispatch.
+        if (telem)
+            this.journalAppend(telem.key, { decisionId: telem.decisionId, status: 'sent', at: Date.now() });
         const controller = new AbortController();
         res.on('close', () => { if (!res.writableFinished)
             controller.abort(); });
-        const up = await fetch(this.upstream + url, {
-            method: req.method,
-            headers,
-            body: req.method === 'GET' || req.method === 'HEAD' || !body ? undefined : new Uint8Array(body),
-            signal: controller.signal,
-            redirect: 'manual',
-        });
+        let up;
+        try {
+            up = await fetch(this.upstream + url, {
+                method: req.method,
+                headers,
+                body: req.method === 'GET' || req.method === 'HEAD' || !body ? undefined : new Uint8Array(body),
+                signal: controller.signal,
+                redirect: 'manual',
+            });
+        }
+        catch (err) {
+            if (telem)
+                this.journalAppend(telem.key, { decisionId: telem.decisionId, status: 'failed', at: Date.now(), error: err.message });
+            throw err;
+        }
         const outHeaders = {};
         up.headers.forEach((v, k) => { if (!DROP_RESPONSE.has(k))
             outHeaders[k] = v; });
@@ -126,29 +149,99 @@ export class JevGateway {
             return;
         }
         res.writeHead(up.status, outHeaders);
-        if (!up.body)
+        if (!up.body) {
+            if (telem)
+                this.journalAppend(telem.key, { decisionId: telem.decisionId, status: up.ok ? 'completed' : 'failed', at: Date.now() });
             return void res.end();
-        Readable.fromWeb(up.body).pipe(res);
+        }
+        const stream = Readable.fromWeb(up.body);
+        if (telem)
+            this.attachTelemetry(stream, telem, up, res, controller);
+        stream.pipe(res);
     }
-    /** Decide effort for this request and return the messages with all insertions replayed. */
+    /**
+     * Tee a bounded copy of a routed response for usage telemetry. The stream
+     * pipes to the client unchanged — listeners only observe the bytes that flow,
+     * so backpressure is preserved. The final journal status is `completed` when
+     * the stream ends cleanly under an OK status, `failed` on an upstream error
+     * status or a stream error, and `unknown` when the client went away first
+     * (acceptance unknown).
+     */
+    attachTelemetry(stream, telem, up, res, controller) {
+        const chunks = [];
+        let size = 0;
+        let done = false;
+        const finish = (streamOk) => {
+            if (done)
+                return;
+            done = true;
+            const clientGone = controller.signal.aborted || (res.destroyed && !res.writableFinished);
+            const status = clientGone ? 'unknown' : streamOk && up.ok ? 'completed' : 'failed';
+            const usage = responseUsage(up.headers.get('content-type') ?? '', Buffer.concat(chunks));
+            this.journalAppend(telem.key, { decisionId: telem.decisionId, status, at: Date.now(), ...(usage ? { usage } : {}) });
+        };
+        stream.on('data', (c) => {
+            if (size >= TELEMETRY_CAP)
+                return;
+            chunks.push(c);
+            size += c.length;
+        });
+        stream.on('end', () => finish(true));
+        stream.on('error', () => finish(false));
+        res.on('close', () => finish(false));
+    }
+    /**
+     * Single-flight per branch: an identical request (same boundary fingerprint)
+     * awaits the prepared transformation; anything else serializes on the
+     * thread's queue and is decided exactly once.
+     */
     async route(headers, body) {
         const messages = body.messages;
         const session = headers['x-claude-code-session-id'] ?? 'no-session';
         const agent = headers['x-claude-code-agent-id'] ?? 'main';
         const hashes = prefixHashes(messages);
         const key = `${session}|${agent}|${hashes[1]?.slice(0, 16) ?? 'empty'}`;
-        const t = this.thread(key);
-        // Keep only insertions whose prefix is still Claude Code's history (compaction or /rewind drop the rest).
-        const kept = t.insertions.filter((ins) => ins.index <= messages.length && hashes[ins.index] === ins.prefixHash);
+        const t = this.thread(key, messages, hashes);
         const lastUser = lastIndexOfRole(messages, 'user');
-        if (kept.length !== t.insertions.length || t.decidedAt > lastUser + 1) {
-            t.insertions = kept;
-            t.decidedAt = Math.min(t.decidedAt, Math.max(0, lastUser));
-            t.effort = null;
+        if (lastUser < 0)
+            return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
+        const fp = requestFingerprint(hashes[lastUser + 1], body);
+        const hit = t.prepared.get(fp);
+        if (hit)
+            return this.replay(await hit, key, messages, hashes);
+        const prepared = t.queue.then(() => this.decide(t, key, fp, lastUser, messages, hashes, body, session, agent));
+        t.queue = prepared.then(() => undefined, () => undefined);
+        t.prepared.set(fp, prepared);
+        void prepared.catch(() => {
+            if (t.prepared.get(fp) === prepared)
+                t.prepared.delete(fp);
+        });
+        while (t.prepared.size > PREPARED_CAP) {
+            const oldest = t.prepared.keys().next().value;
+            if (oldest === undefined || oldest === fp)
+                break;
+            t.prepared.delete(oldest);
         }
-        if (lastUser < 0 || lastUser < t.decidedAt)
-            return applyInsertions(messages, t.insertions); // retry: replay only
-        t.decidedAt = lastUser + 1;
+        return this.replay(await prepared, key, messages, hashes);
+    }
+    /** Apply a prepared transformation to a request's messages (retry-safe). */
+    replay(p, key, messages, hashes) {
+        return { messages: applyInsertions(messages, validInsertions(p.insertions, messages, hashes)), decisionId: p.decisionId, key };
+    }
+    /**
+     * Runs inside the thread's queue: restores the common-ancestor state when the
+     * request branched off earlier history, decides effort, journals the prepared
+     * transformation BEFORE it is forwarded upstream, and returns it.
+     */
+    async decide(t, key, fp, lastUser, messages, hashes, body, session, agent) {
+        // Keep only insertions whose prefix is still Claude Code's history (compaction or /rewind drop the rest).
+        t.insertions = validInsertions(t.insertions, messages, hashes);
+        // This boundary was never prepared: if the thread state reflects an
+        // abandoned branch (changed history, rewind, restart), first restore the
+        // state the deepest shared ancestor left behind.
+        const ancestor = deepestBoundary(t.records, hashes, lastUser);
+        if (ancestor !== t.tip)
+            this.restore(t, ancestor, messages, hashes, lastUser);
         const last = messages[lastUser];
         const prompting = !hasToolResults(last) && userText(last).length > 0;
         // Claude Code states its own /effort level as a per-turn statement. A *change* in that value is the user
@@ -170,7 +263,12 @@ export class JevGateway {
             };
             this.display.record(session, agent, manual);
             this.writeStatus(session, agent, manual);
-            return applyInsertions(messages, t.insertions);
+            const rec = this.journalRecord(t, fp, lastUser, hashes, manual.effort, prompting ? 'task' : 'step', current);
+            t.decidedAt = lastUser + 1;
+            this.journalAppend(key, rec);
+            t.records.push(rec);
+            t.tip = rec;
+            return { decisionId: rec.decisionId, insertions: rec.insertions };
         }
         let decision;
         if (prompting || !t.profile) {
@@ -205,9 +303,81 @@ export class JevGateway {
         this.opts.onDecision?.(session, final);
         this.opts.trace?.({ event: 'gateway_decision', session, agent, index: lastUser, ...final });
         this.writeStatus(session, agent, final);
-        return applyInsertions(messages, t.insertions);
+        const rec = this.journalRecord(t, fp, lastUser, hashes, final.effort, decision.kind, current);
+        t.decidedAt = lastUser + 1;
+        this.journalAppend(key, rec);
+        t.records.push(rec);
+        t.tip = rec;
+        return { decisionId: rec.decisionId, insertions: rec.insertions };
     }
-    thread(key) {
+    journalRecord(t, fp, lastUser, hashes, effort, kind, current) {
+        return {
+            decisionId: randomUUID(),
+            requestFingerprint: fp,
+            lastUser,
+            boundaryHash: hashes[lastUser + 1],
+            insertions: t.insertions.map((i) => ({ ...i })),
+            routerSnapshot: t.router.snapshot(),
+            policy: POLICY_VERSION,
+            requested: effort,
+            current,
+            kind,
+            manual: t.manual,
+            turn: t.turn,
+            consecutiveFailures: t.consecutiveFailures,
+            clientEffort: t.clientEffort,
+            profile: t.profile,
+            status: 'prepared',
+            at: Date.now(),
+        };
+    }
+    /**
+     * Rewind thread state to a journaled decision: restore the opaque router
+     * snapshot and rebuild the deterministic fields (prompt, profile, counters,
+     * trajectory) from the surviving branch, without ever storing prompt text.
+     */
+    restore(t, tip, messages, hashes, lastUser) {
+        if (tip)
+            t.router.restore(tip.routerSnapshot);
+        else
+            t.router = new EffortRouter({ jev: this.opts.jev, bounds: this.opts.bounds });
+        t.trajectory = [];
+        if (tip) {
+            // Replay the surviving branch's step records to rebuild the trajectory
+            // Jev sees — the same lines the live path would have produced.
+            for (const rec of t.records) {
+                // Manual overrides are journaled but produced no live trajectory line.
+                if (rec.kind !== 'step' || rec.manual || rec.lastUser > tip.lastUser)
+                    continue;
+                if (rec.lastUser + 1 >= hashes.length || hashes[rec.lastUser + 1] !== rec.boundaryHash)
+                    continue;
+                const { batch } = lastToolRound(messages.slice(0, rec.lastUser + 1));
+                t.trajectory.push(`step ${rec.turn} @${rec.current ?? rec.requested}: ${batch.map((c) => `${c.tool} ${c.summary.slice(0, 60)} ${c.failed ? 'FAILED' : 'ok'}`).join('; ')}`);
+            }
+        }
+        t.profile = tip?.profile ?? null;
+        t.turn = tip?.turn ?? 0;
+        t.consecutiveFailures = tip?.consecutiveFailures ?? 0;
+        t.manual = tip?.manual ?? false;
+        t.clientEffort = tip?.clientEffort ?? null;
+        t.prompt = tip ? lastPrompt(messages.slice(0, tip.lastUser + 1)) : '';
+        t.decidedAt = tip ? tip.lastUser + 1 : 0;
+        // Effort in force at the new boundary: the last surviving statement,
+        // else whatever the ancestor left in force.
+        t.effort = [...t.insertions].reverse().find((i) => i.index <= lastUser)?.effort ?? tip?.requested ?? null;
+        t.tip = tip;
+    }
+    journalAppend(key, line) {
+        if (!this.journal)
+            return;
+        try {
+            this.journal.append(key, line);
+        }
+        catch (err) {
+            this.opts.onNotice?.(`journal write error: ${err.message}`);
+        }
+    }
+    thread(key, messages, hashes) {
         let t = this.threads.get(key);
         if (t) {
             this.threads.delete(key); // LRU: re-insert as most recent
@@ -216,8 +386,28 @@ export class JevGateway {
         }
         t = {
             router: new EffortRouter({ jev: this.opts.jev, bounds: this.opts.bounds }),
-            insertions: [], decidedAt: 0, prompt: '', profile: null, turn: 0, consecutiveFailures: 0, trajectory: [], manual: false, effort: null, clientEffort: null,
+            insertions: [], decidedAt: 0, prompt: '', profile: null, turn: 0, consecutiveFailures: 0, trajectory: [],
+            manual: false, effort: null, clientEffort: null,
+            queue: Promise.resolve(), prepared: new Map(), records: [], tip: null,
         };
+        // A cache miss (eviction or restart) rebuilds the thread from the durable
+        // journal, so a continued conversation replays the statements sent before.
+        if (this.journal) {
+            try {
+                t.records = this.journal.records(key);
+                for (const rec of t.records) {
+                    t.prepared.set(rec.requestFingerprint, Promise.resolve({ decisionId: rec.decisionId, insertions: rec.insertions }));
+                }
+                const tip = deepestBoundary(t.records, hashes);
+                if (tip) {
+                    t.insertions = tip.insertions.map((i) => ({ ...i }));
+                    this.restore(t, tip, messages, hashes, Math.max(0, lastIndexOfRole(messages, 'user')));
+                }
+            }
+            catch (err) {
+                this.opts.onNotice?.(`journal read error: ${err.message}`);
+            }
+        }
         this.threads.set(key, t);
         const max = this.opts.maxThreads ?? 256;
         while (this.threads.size > max)
@@ -236,6 +426,97 @@ export class JevGateway {
             // the statusline is cosmetic
         }
     }
+}
+/** Insertions whose stored prefix is still a prefix of this request. */
+function validInsertions(insertions, messages, hashes) {
+    return insertions.filter((ins) => ins.index <= messages.length && ins.index < hashes.length && hashes[ins.index] === ins.prefixHash);
+}
+/**
+ * Deepest journaled decision whose boundary is a prefix of this request — the
+ * common ancestor for a rewind or rebuild. `beforeLastUser` restricts the
+ * search to boundaries strictly above the current one (its own record is not
+ * its ancestor).
+ */
+function deepestBoundary(records, hashes, beforeLastUser) {
+    let best = null;
+    for (const r of records) {
+        if (beforeLastUser !== undefined && r.lastUser >= beforeLastUser)
+            continue;
+        if (r.lastUser + 1 >= hashes.length || hashes[r.lastUser + 1] !== r.boundaryHash)
+            continue;
+        if (!best || r.lastUser >= best.lastUser)
+            best = r;
+    }
+    return best;
+}
+/** Parse usage + stop_reason out of a bounded response copy (SSE or plain JSON). */
+function responseUsage(contentType, buf) {
+    const text = buf.toString('utf8');
+    if (contentType.includes('text/event-stream'))
+        return sseUsage(text);
+    if (contentType.includes('json'))
+        return bodyUsage(text);
+    return undefined;
+}
+function sseUsage(text) {
+    const usage = {};
+    let found = false;
+    for (const evt of text.split(/\r?\n\r?\n/)) {
+        for (const line of evt.split('\n')) {
+            if (!line.startsWith('data:'))
+                continue;
+            const data = line.slice(5).trim();
+            if (!data || data === '[DONE]')
+                continue;
+            let j;
+            try {
+                j = JSON.parse(data);
+            }
+            catch {
+                continue;
+            }
+            if (j.type === 'message_start' && j.message) {
+                found = true;
+                if (typeof j.message.model === 'string')
+                    usage.model = j.message.model;
+                mergeUsage(usage, j.message.usage);
+            }
+            else if (j.type === 'message_delta') {
+                found = true;
+                mergeUsage(usage, j.usage);
+                if (typeof j.delta?.stop_reason === 'string')
+                    usage.stopReason = j.delta.stop_reason;
+            }
+        }
+    }
+    return found ? usage : undefined;
+}
+function bodyUsage(text) {
+    try {
+        const j = JSON.parse(text);
+        const usage = {};
+        if (typeof j.model === 'string')
+            usage.model = j.model;
+        if (typeof j.stop_reason === 'string')
+            usage.stopReason = j.stop_reason;
+        mergeUsage(usage, j.usage);
+        return Object.keys(usage).length ? usage : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function mergeUsage(u, raw) {
+    if (!raw)
+        return;
+    if (typeof raw.input_tokens === 'number')
+        u.inputTokens = raw.input_tokens;
+    if (typeof raw.output_tokens === 'number')
+        u.outputTokens = raw.output_tokens;
+    if (typeof raw.cache_read_input_tokens === 'number')
+        u.cacheReadInputTokens = raw.cache_read_input_tokens;
+    if (typeof raw.cache_creation_input_tokens === 'number')
+        u.cacheCreationInputTokens = raw.cache_creation_input_tokens;
 }
 export function readStatus(statusDir, session) {
     if (!/^[\w-]+$/.test(session))
