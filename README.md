@@ -55,23 +55,24 @@ This opens the regular interactive Claude Code, the same interface, tools and ap
 
 ### Seeing the effort change
 
-Effort mostly changes on steps where Claude only runs tools and writes no text. Claude Code gives hooks no clean way to label those steps, so jev-opus uses two places:
+Every assistant text response gets a compact visual effort badge by default. When the selected level changes, the badge shows the transition and routing reason:
 
-- **Status line (live).** It shows the current prompt's whole path as it happens, with the newest level in capitals. It resets at your next prompt.
-  ```
-  ◆ Jev · MEDIUM · debugging                  prompt starts
-  ◆ Jev · medium → HIGH · diagnosing          tests failed: HIGH while Claude fixes the bug
-  ◆ Jev · medium → high → MEDIUM · verifying  tests pass: back down
-  ```
-- **Badges above Claude's text (in the conversation).** A badge appears on the first message of each prompt and wherever the level changed since the previous badge. It shows every level in between, so a summary badge like `◆ Jev · MEDIUM → HIGH → MEDIUM · verifying` records the whole path. Unchanged steps get no badge.
+```text
+◆ Jev · MEDIUM → HIGH · failing checks
+◆ Jev · HIGH → MEDIUM · matching checks passed
+```
 
-Opt-ins:
-- `JEV_OPUS_TOOL_NOTICES=1` adds a notice at the exact tool call where a change happened. Claude Code prefixes it with `PreToolUse:Bash says:`.
-- `JEV_OPUS_NARRATION=1` asks Claude for one short line before each tool call, so more steps have text for a badge. Opus 5.5 often turns these lines into hidden progress notes, so this is off by default.
+Tool-only responses receive one native notice at the first tool call, including parallel tool batches. Claude Code controls its placement and prefixes it with `PreToolUse:Bash says:`. The footer still shows the current prompt's live effort path. Badges describe the **selected/requested setting**, not a measurement of the model's internal reasoning.
 
-To turn the display off, use `JEV_OPUS_NO_INLINE_EFFORT=1` for badges and `JEV_OPUS_NO_STATUSLINE=1` for the status line.
+Display options, set before the command or in `~/.config/jev-opus/.env`:
 
-The badges use Claude Code's [MessageDisplay hook](https://code.claude.com/docs/en/hooks#messagedisplay). They change only what's shown on screen: the model never sees them and they cost no tokens. Claude Code's next-prompt suggestion reuses the conversation, so the gateway recognises it and never routes it; it doesn't move the status line.
+- `JEV_OPUS_DISPLAY=every-response` is the default. Use `changes` for only the first response of a prompt and effort changes, or `off` for no inline annotations.
+- `JEV_OPUS_SHOW_DECISION_IDS=1` adds short `D-…` references to badges for debugging. IDs are hidden by default and always retained in audit logs.
+- `JEV_OPUS_TOOL_NOTICES=0` disables tool notices; they are now enabled by default.
+- `JEV_OPUS_NARRATION=1` optionally asks Claude for a short line before tool calls. It changes model behavior, adds output tokens, and cannot guarantee a visible line; it remains off by default.
+- `JEV_OPUS_NO_INLINE_EFFORT=1` disables launch-time hooks. `JEV_OPUS_NO_STATUSLINE=1` disables the footer.
+
+[MessageDisplay](https://code.claude.com/docs/en/hooks#messagedisplay) annotations only change the display; they do not enter the stored model conversation. Tool-only responses do not trigger that hook, so native tool notices are the fallback. Display-message UUIDs differ from provider message IDs: audit records explicitly label text annotations as associated with the latest session decision, while tool annotations use the generating tool ID when available. The returned badge is logged; successful rendering or user visibility is not claimed.
 
 **How it works:** `jev-opus claude` starts a small local gateway and points Claude Code at it (`ANTHROPIC_BASE_URL`, an officially supported setup that keeps your claude.ai login). For each request on the Jev model, the gateway asks Jev and inserts a **per-message effort statement** at the turn it governs. It replays every earlier insertion byte-identically on later requests, so the cached prefix and preserved-thinking blocks stay valid. Verified live: effort went medium → low → high → high → low inside one prompt, while cache reads grew on every call (24.5k → 29.9k → 30.0k → 31.4k → 32.3k).
 
@@ -146,7 +147,7 @@ One controller (`src/router/`) serves both modes. It estimates the reasoning the
 - high stakes add a level
 
 **During the task,** a reducer tracks evidence across tool calls:
-- **Unresolved failures** are tracked by a stable fingerprint. A later pass of the same command or test clears them, even when rerun as `npm test 2>&1 | tail`. A successful read in between does **not**.
+- **Unresolved failures** are tracked by a stable fingerprint. A later pass of the same command or test clears them, even when rerun with recognized output plumbing such as `npm test 2>&1 | tail`. Check identities preserve explicit directories, runner commands, flags, targets, and case; a passing subset or another package cannot clear the original suite. Ambiguous shell commands use conservative command matching. A successful read in between does **not**.
 - **Recovery history:** a repeated failure goes one level above the highest effort already tried on it, up to your ceiling, so `max` is reachable when you allow it.
 - **Environment blockers** (network, registry, permissions, credentials, missing commands) hold the current effort instead of raising it.
 - **Lowering effort** needs positive evidence: no unresolved issues and a clearly routine next step. Without that, it holds.
@@ -163,9 +164,24 @@ Inserted effort statements become part of the history the model has seen, so the
 - **Eviction and restart:** after a cache eviction or a gateway restart, the conversation is rebuilt from the journal. Verified live: after a restart, a resumed conversation read 32,181 tokens from cache and wrote 75.
 - **Retries:** identical concurrent requests share one prepared decision.
 - **Edited history:** a request whose earlier content changed is re-routed from the common ancestor.
-- **Privacy:** the journal holds hashes, effort levels and usage numbers, never prompts, tool output or credentials. Final usage and stop reason are recorded for each decision.
+- **Privacy:** the journal holds hashes, effort levels and usage numbers, never prompts, tool output or credentials. Usage and stop reason are recorded separately for each request attempt. Decisions also carry routing reasons, source, policy versions, bounds, and evaluator timing.
 
-**Accounting.** Driver-mode task costs are differences between Claude Code's cumulative session totals, subagents included. Per-call output tokens in driver mode are the SDK's streamed values and can undercount. Use task totals, or the gateway journal, for exact numbers.
+**Accounting.** Driver-mode task costs are differences between Claude Code's cumulative session totals, subagents included. Per-call output tokens in driver mode are the SDK's streamed values and can undercount. Use task totals, or the gateway audit export for observed per-attempt usage. Missing final usage is marked incomplete; it is never silently treated as zero. Legacy journals lack exact retry attribution.
+
+## Audit history
+
+```bash
+jev-opus audit                     # list decisions, attempts, and observed output usage
+jev-opus audit D-a3e014f2           # inspect a reference from audit output or debug badges
+jev-opus audit D-a3e014f2 --json    # export matching decisions and raw events
+jev-opus audit --json              # export all gateway journals
+```
+
+The owner-only JSONL files in `~/.config/jev-opus/journal/` are the durable source. A decision ID is created before its trace/display metadata; each actual upstream dispatch gets a distinct attempt ID, including retries of a shared decision. Attempt usage is aggregated once per attempt. Exports retain separate timestamps, provider IDs when available, and visual annotations without assistant text. Old records remain readable and are explicitly marked as legacy where attribution is unavailable.
+
+A response is completed only after protocol completion. In-stream errors are failed; streams ending without completion are unknown. Usage coverage is tracked separately. Very large non-streaming JSON bodies that exceed the telemetry parser's 1 MiB bound are forwarded unchanged but marked unknown; streamed content is parsed incrementally.
+
+Prepared decisions and dispatch records are flushed before forwarding. If these writes fail, the request is not sent. Later audit write failures produce a visible degraded-logging notice; they cannot undo an already sent request. A corrupt recovery journal blocks replay rather than silently inventing replacement history. Keep the JSONL files intact when exporting or backing them up.
 
 ## Credentials and isolation
 

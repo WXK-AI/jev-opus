@@ -18,7 +18,7 @@ const message = (index = 0, delta = 'Investigating the test failure.\n') => ({
 const preTool = { hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'Bash' };
 
 test('inline badges preserve streamed text and appear once per message', () => {
-  const display = new EffortDisplay();
+  const display = new EffortDisplay(256, 'changes');
   display.record('s', 'main', decision);
   assert.deepEqual(display.handle(message()), {
     hookSpecificOutput: {
@@ -82,7 +82,7 @@ test('UI settings preserve existing hooks, permissions, status line, and caller 
     assert.deepEqual(settings.permissions, original.permissions);
     assert.deepEqual(settings.statusLine, original.statusLine);
     assert.deepEqual(settings.hooks.PreToolUse[0], original.hooks.PreToolUse[0]);
-    assert.equal(settings.hooks.PreToolUse.length, 1, 'no tool-notice hook by default: only the caller\'s own');
+    assert.equal(settings.hooks.PreToolUse.length, 2, 'the default notice hook preserves the caller hook');
     assert.equal(settings.hooks.MessageDisplay[0].hooks[0].timeout, 1);
     assert.equal(result.at(-1), '-c');
   }
@@ -105,14 +105,14 @@ test('settings files are merged in memory without changing the original file', (
   }
 });
 
-test('a text badge shows every level since the previous badge', () => {
-  const display = new EffortDisplay();
+test('changes mode labels the current decision, not an accumulated path', () => {
+  const display = new EffortDisplay(256, 'changes');
   const step = (effort: EffortDecision['effort'], previous: EffortDecision['effort']): EffortDecision => ({ ...decision, effort, previous, changed: effort !== previous });
   display.record('s', 'main', step('medium', 'low')); // task start, tool-only step
   display.record('s', 'main', step('high', 'medium')); // failure, tool-only step
   display.record('s', 'main', step('high', 'high')); // unchanged
   display.record('s', 'main', step('medium', 'high')); // tests pass
-  assert.match(JSON.stringify(display.handle(message())), /Jev · LOW → MEDIUM → HIGH → MEDIUM · diagnosing/);
+  assert.match(JSON.stringify(display.handle(message())), /Jev · HIGH → MEDIUM · diagnosing/);
   assert.deepEqual(display.handle({ ...message(), message_id: 'm2' }), {}, 'no change since the last badge: no badge');
   display.record('s', 'main', { ...step('low', 'medium'), kind: 'task' }); // a new prompt, same session
   assert.match(JSON.stringify(display.handle({ ...message(), message_id: 'm3' })), /Jev · MEDIUM → LOW/, 'a new prompt announces its level');
@@ -120,9 +120,9 @@ test('a text badge shows every level since the previous badge', () => {
   assert.match(JSON.stringify(display.handle({ ...message(), message_id: 'm4' })), /Jev · LOW · diagnosing/, 'even when unchanged, the first message of a prompt gets a badge');
 });
 
-test('tool notices are opt-in', () => {
-  assert.deepEqual(Object.keys(inlineEffortSettings('http://x/h').hooks!), ['MessageDisplay']);
-  assert.deepEqual(Object.keys(inlineEffortSettings('http://x/h', { toolNotices: true }).hooks!).sort(), ['MessageDisplay', 'PreToolUse']);
+test('tool notices default on with an explicit opt-out', () => {
+  assert.deepEqual(Object.keys(inlineEffortSettings('http://x/h', { toolNotices: false }).hooks!), ['MessageDisplay']);
+  assert.deepEqual(Object.keys(inlineEffortSettings('http://x/h').hooks!).sort(), ['MessageDisplay', 'PreToolUse']);
 });
 
 test('narration: one short line before each tool call, merged with a caller prompt', async () => {
@@ -156,4 +156,81 @@ test('gateway status file carries the path of the current prompt and resets on a
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('every-response badges are visual, stable across hook retries, and carry audit identity', () => {
+  const annotations: unknown[] = [];
+  const d = new EffortDisplay(256, 'every-response', (_key, event) => annotations.push(event), true);
+  const context = { key: 'branch', decisionId: '12345678-aaaa', attemptId: 'a1' };
+  d.record('s', 'main', decision, context);
+  const first = d.handle(message());
+  assert.match(JSON.stringify(first), /LOW → HIGH.*D-12345678/);
+  d.record('s', 'main', { ...decision, effort: 'medium', previous: 'high' }, { ...context, decisionId: '87654321-bbbb', attemptId: 'a2' });
+  assert.deepEqual(d.handle(message()), first, 'the same display message cannot be relabelled by a newer decision');
+  assert.equal(annotations.length, 1, 'a hook retry does not duplicate the audit event');
+  assert.match(JSON.stringify(d.handle({ ...message(), message_id: 'new' })), /HIGH → MEDIUM.*D-87654321/);
+  assert.match(JSON.stringify(d.handle({ ...message(), message_id: 'another' })), /Jev · MEDIUM/);
+  assert.equal(JSON.stringify(first).includes('additionalContext'), false);
+});
+
+test('tool IDs attribute delayed hooks to their generating attempt and deduplicate a parallel batch', () => {
+  const annotations: Array<{ attemptId?: string; association: string }> = [];
+  const d = new EffortDisplay(256, 'every-response', (_key, event) => annotations.push(event));
+  const old = { key: 'branch', decisionId: 'old', attemptId: 'a1' };
+  d.record('s', 'main', decision, old);
+  d.record('s', 'main', { ...decision, effort: 'medium', previous: 'high' }, { ...old, decisionId: 'new', attemptId: 'a2' });
+  d.bindTool('s', 'main', 'tool-1', decision, old);
+  d.bindTool('s', 'main', 'tool-2', decision, old);
+  assert.match(JSON.stringify(d.handle({ ...preTool, tool_use_id: 'tool-1' })), /LOW → HIGH/);
+  assert.deepEqual(d.handle({ ...preTool, tool_use_id: 'tool-2' }), {});
+  assert.equal(annotations[0].attemptId, 'a1');
+  assert.equal(annotations[0].association, 'tool-id');
+});
+
+test('off mode returns no metadata', () => {
+  const d = new EffortDisplay(256, 'off');
+  d.record('s', 'main', decision);
+  assert.deepEqual(d.handle(message()), {});
+  assert.deepEqual(d.handle(preTool), {});
+});
+
+test('task badge names the task and never shows the pre-floor estimate (full reasons live in jev-opus audit)', async () => {
+  const { formatEffortBadge } = await import('../src/gateway/display.ts');
+  const badge = formatEffortBadge({ ...decision, kind:'task', effort:'medium', previous:'medium', changed:false, reasons:['difficulty 1.1/4 → low','debugging floor medium'],
+    profile: { taskType: 'debugging', typeConfidence: 0.9, difficulty: 1.1, stakes: 0.1, source: 'jev' } });
+  assert.equal(badge, '◆ Jev · MEDIUM · debugging');
+  assert.doesNotMatch(badge,/→ low/);
+});
+
+test('text observed upstream suppresses an early tool notice before MessageDisplay runs', () => {
+  const d = new EffortDisplay();
+  const context = { key:'branch', decisionId:'decision', attemptId:'attempt' };
+  d.record('s','main',decision,context);
+  d.markText('s','main',context);
+  d.bindTool('s','main','tool',decision,context);
+  assert.deepEqual(d.handle({...preTool,tool_use_id:'tool'}),{});
+  assert.match(JSON.stringify(d.handle(message())),/LOW → HIGH/);
+});
+
+test('task-start badges name the task, not internal policy reasons', async () => {
+  const { formatEffortBadge } = await import('../src/gateway/display.ts');
+  const task: EffortDecision = {
+    kind: 'task', effort: 'medium', previous: 'medium', changed: false, source: 'jev', jevLatencyMs: 1,
+    reasons: ['difficulty 1.1/4 → low', 'debugging floor medium'],
+    profile: { taskType: 'code_small', typeConfidence: 0.9, difficulty: 1.1, stakes: 0.1, source: 'jev' },
+  };
+  assert.equal(formatEffortBadge(task), '◆ Jev · MEDIUM · code small');
+});
+
+test('step badges use plain labels, never raw policy reasons', async () => {
+  const { formatEffortBadge } = await import('../src/gateway/display.ts');
+  const step = (reasons: string[], phase = 'exploring'): EffortDecision => ({
+    kind: 'step', effort: 'low', previous: 'medium', changed: true, source: 'jev', jevLatencyMs: 1, reasons,
+    signals: { phase: phase as 'exploring', phaseConfidence: 0.9, stepDifficulty: 1, stuck: 0.1, source: 'jev' },
+  });
+  assert.equal(formatEffortBadge(step(['exploring → -1'])), '◆ Jev · MEDIUM → LOW · exploring');
+  assert.equal(formatEffortBadge(step(['failing checks → recovery effort', 'diagnosing → +1'], 'diagnosing')), '◆ Jev · MEDIUM → LOW · failing checks');
+  assert.equal(formatEffortBadge(step(['failing check now passes → release hold', 'verifying → -1'])), '◆ Jev · MEDIUM → LOW · matching checks passed');
+  assert.equal(formatEffortBadge(step(['exploring → -1', '2 unresolved issue(s) → hold high'])), '◆ Jev · MEDIUM → LOW · unresolved failure, holding');
+  assert.equal(formatEffortBadge(step(['environment blocker → hold'])), '◆ Jev · MEDIUM → LOW · environment issue, holding');
 });

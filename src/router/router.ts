@@ -196,7 +196,9 @@ export class EffortRouter {
     const h = applyHysteresis(ctx.current, target.effort, this.hold, signals.phase === 'finishing');
     this.hold = h.hold;
     const effort = clampEffort(h.effort, bounds.min, bounds.max);
-    const reasons = recovered ? ['failing check now passes → release hold', ...target.reasons] : [...target.reasons];
+    const reasons = recovered ? ['failing check now passes → release hold', ...target.reasons]
+      : outcome.failedCalls > 0 && !outcome.environmentOnly ? ['failing checks → recovery effort', ...target.reasons]
+        : [...target.reasons];
     if (h.note) reasons.push(h.note);
     if (effort !== h.effort) reasons.push(`bounded to ${effort}`);
     return {

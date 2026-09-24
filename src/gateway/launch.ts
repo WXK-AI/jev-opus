@@ -28,14 +28,20 @@ export function gatewayClientEnv(baseUrl: string): Record<string, string> {
 
 function appendLog(line: string): void {
   try {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    fs.appendFileSync(GATEWAY_LOG, `${new Date().toISOString()} ${line.replace(/\x1b\[[0-9;]*m/g, '')}\n`);
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    fs.appendFileSync(GATEWAY_LOG, `${new Date().toISOString()} ${line.replace(/\x1b\[[0-9;]*m/g, '')}\n`, { mode: 0o600 });
+    fs.chmodSync(GATEWAY_LOG, 0o600);
   } catch {
     // logging is best-effort
   }
 }
 
-export function createGateway(jev: JevLike | null, bounds: Bounds, opts: { port?: number; echo?: boolean; trace?: (e: Record<string, unknown>) => void } = {}): JevGateway {
+/** Log a line to gateway.log without touching the terminal. */
+export function logToGateway(line: string): void {
+  appendLog(line);
+}
+
+export function createGateway(jev: JevLike | null, bounds: Bounds, opts: { port?: number; echo?: boolean; quiet?: boolean; trace?: (e: Record<string, unknown>) => void } = {}): JevGateway {
   return new JevGateway({
     jev,
     bounds,
@@ -52,13 +58,16 @@ export function createGateway(jev: JevLike | null, bounds: Bounds, opts: { port?
     onNotice: (m) => {
       appendLog(`! ${m}`);
       if (opts.echo) console.log(`! ${m}`);
+      // No stderr here: in `jev-opus claude` the full-screen Claude Code UI owns
+      // the terminal. Audit problems reach gateway.log and the hook warning.
+      else if (m.startsWith('journal ') && !opts.quiet) console.error(`Jev audit: ${m}`);
     },
   });
 }
 
 /** `jev-opus claude [claude args…]`: gateway in-process + the normal interactive Claude Code on top of it. */
 export async function launchClaude(jev: JevLike | null, bounds: Bounds, claudeArgs: string[], trace?: (e: Record<string, unknown>) => void): Promise<number> {
-  const gateway = createGateway(jev, bounds, { trace });
+  const gateway = createGateway(jev, bounds, { trace, quiet: true });
   const baseUrl = await gateway.listen();
 
   const { env } = childEnv(process.env, { connectors: true });
@@ -71,7 +80,7 @@ export async function launchClaude(jev: JevLike | null, bounds: Bounds, claudeAr
     // Opus 5.5 turns most mid-task notes into hidden progress blocks, so narration is opt-in.
     const base = process.env.JEV_OPUS_NARRATION === '1' ? withNarration(claudeArgs) : [...claudeArgs];
     const args = withGatewaySettings(base, {
-      ...(process.env.JEV_OPUS_NO_INLINE_EFFORT === '1' ? {} : inlineEffortSettings(baseUrl + gateway.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES === '1' })),
+      ...(process.env.JEV_OPUS_NO_INLINE_EFFORT === '1' ? {} : inlineEffortSettings(baseUrl + gateway.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES !== '0' })),
       ...(process.env.JEV_OPUS_NO_STATUSLINE === '1' ? {} : { statusLine: { type: 'command' as const, command } }),
     });
     if (!args.some((a) => a === '--model' || a.startsWith('--model='))) args.unshift('--model', JEV_MODEL_ID);

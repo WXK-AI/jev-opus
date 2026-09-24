@@ -511,3 +511,128 @@ test('a next-prompt suggestion fork replays statements but is never routed or re
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('retries have separate attempts, summed usage, stable decision IDs, and durable annotations', async () => {
+  const up = await fakeUpstream();
+  const dir = tmpdir();
+  const traces: Array<Record<string, unknown>> = [];
+  const gw = new JevGateway({ jev: null, bounds: { min: 'medium', max: 'medium' }, upstream: up.url, journalDir: dir, trace: (e) => traces.push(e) });
+  const base = await gw.listen();
+  try {
+    const messages = [u('test audit')];
+    await Promise.all([post(base, body(messages)), post(base, body(messages))]);
+    const journal = new Journal(dir);
+    const key = journalKey('sess-1', messages);
+    const [rec] = journal.records(key);
+    assert.equal(journal.records(key).length, 1);
+    assert.equal(rec.attempts!.length, 2);
+    assert.equal(new Set(rec.attempts!.map((a) => a.attemptId)).size, 2);
+    assert.equal(rec.usage!.outputTokens, 84);
+    assert.ok(rec.attempts!.every((a) => a.usageComplete && a.status === 'completed'));
+    assert.equal(traces[0].decisionId, rec.decisionId);
+    assert.ok(rec.decision!.reasons.length);
+    assert.ok(rec.at <= rec.updatedAt!);
+    const rendered = await fetch(base + gw.displayHookPath, { method:'POST',body:JSON.stringify({hook_event_name:'MessageDisplay',session_id:'sess-1',turn_id:'turn',message_id:'display',index:0,delta:'Hello'}) }).then((r) => r.json());
+    assert.doesNotMatch(JSON.stringify(rendered), /D-[0-9a-f]{8}/, 'decision IDs stay out of default badges');
+    const annotations = journal.events(key).filter((e) => 'event' in e);
+    assert.equal(annotations.length, 1);
+    assert.equal(annotations[0].decisionId, rec.decisionId);
+    const { auditJournal } = await import('../src/gateway/audit.ts');
+    const report = auditJournal(dir, `D-${rec.decisionId.slice(0,8)}`);
+    assert.equal(report.summary.observedOutputTokens, 84);
+    assert.equal(report.summary.attempts, 2);
+    assert.equal(report.journals[0].events.length, journal.events(key).length);
+  } finally { await gw.close(); up.close(); fs.rmSync(dir, {recursive:true,force:true}); }
+});
+
+test('HTTP 200 stream errors fail; EOF without message_stop remains unknown', async () => {
+  for (const scenario of ['error', 'incomplete']) {
+    const text = SSE_OK.split('event: message_delta')[0] + (scenario === 'error' ? 'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"PRIVATE"}}\n\n' : '');
+    const up = await fakeUpstream((req,res) => { req.resume(); req.on('end',() => res.writeHead(200,{'content-type':'text/event-stream'}).end(text)); });
+    const dir = tmpdir();
+    const gw = new JevGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:dir});
+    const base = await gw.listen();
+    try {
+      const messages = [u('test protocol')];
+      assert.equal(await post(base,body(messages)), text);
+      const rec = new Journal(dir).records(journalKey('sess-1',messages))[0];
+      assert.equal(rec.status, scenario === 'error' ? 'failed' : 'unknown');
+      assert.equal(rec.attempts![0].usageComplete, false);
+      assert.equal(JSON.stringify(rec).includes('PRIVATE'),false);
+    } finally { await gw.close(); up.close(); fs.rmSync(dir,{recursive:true,force:true}); }
+  }
+});
+
+test('a failed prepared-journal write prevents dispatch', async () => {
+  const up = await fakeUpstream();
+  const dir = tmpdir();
+  const blocked = path.join(dir,'not-a-directory');
+  fs.writeFileSync(blocked,'blocked');
+  const gw = new JevGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:blocked});
+  const base = await gw.listen();
+  try {
+    const response = await fetch(base + '/v1/messages',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body([u('do not dispatch')]))});
+    assert.equal(response.status,502);
+    await response.text();
+    assert.equal(up.seen.length,0);
+  } finally { await gw.close(); up.close(); fs.rmSync(dir,{recursive:true,force:true}); }
+});
+
+test('a late audit-write failure preserves the response and surfaces degraded coverage', async () => {
+  const root = tmpdir(), dir = path.join(root,'journal');
+  const notices: string[] = [];
+  const up = await fakeUpstream((req,res) => {
+    req.resume();
+    req.on('end', () => {
+      fs.renameSync(dir,path.join(root,'saved-journal'));
+      fs.writeFileSync(dir,'blocked');
+      res.writeHead(200,{'content-type':'text/event-stream'}).end(SSE_OK);
+    });
+  });
+  const gw = new JevGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:dir,onNotice:(m)=>notices.push(m)});
+  const base = await gw.listen();
+  try {
+    assert.equal(await post(base,body([u('audit write failure')])),SSE_OK);
+    assert.ok(notices.some((n)=>n.startsWith('journal write error:')));
+    const output = await fetch(base+gw.displayHookPath,{method:'POST',body:JSON.stringify({hook_event_name:'MessageDisplay',session_id:'sess-1',index:0,delta:'Done'})}).then(r=>r.json()) as {systemMessage:string};
+    assert.match(output.systemMessage,/audit logging degraded/);
+    const { auditJournal } = await import('../src/gateway/audit.ts');
+    assert.equal(auditJournal(path.join(root,'saved-journal')).summary.incompleteAttempts,1);
+  } finally { await gw.close(); up.close(); fs.rmSync(root,{recursive:true,force:true}); }
+});
+
+test('legacy usage remains identifiable when a new attempt retries an old decision', async () => {
+  const { foldJournal } = await import('../src/gateway/journal.ts');
+  const record: JournalRecord = {
+    decisionId:'legacy',requestFingerprint:'fp',lastUser:0,boundaryHash:'hash',insertions:[],
+    routerSnapshot:{v:1},policy:'old',requested:'medium',current:'medium',kind:'task',manual:false,
+    turn:0,consecutiveFailures:0,clientEffort:null,profile:null,status:'prepared',at:1,
+  };
+  const [folded] = foldJournal([
+    record,{decisionId:'legacy',status:'completed',at:2,usage:{outputTokens:10}},
+    {decisionId:'legacy',attemptId:'new',status:'sent',at:3},
+    {decisionId:'legacy',attemptId:'new',status:'completed',at:4,usage:{outputTokens:20},usageComplete:true},
+    {decisionId:'legacy',attemptId:'new',status:'completed',at:4,usage:{outputTokens:20},usageComplete:true},
+  ]);
+  assert.equal(folded.at,1);
+  assert.equal(folded.usage!.outputTokens,30);
+  assert.equal(folded.legacyUsage!.outputTokens,10);
+  assert.equal(folded.attempts!.length,1,'duplicate observations of one attempt are not summed twice');
+});
+
+test('journal recovery: a truncated last line (crash mid-append) is skipped; corruption elsewhere still fails', async () => {
+  const { readJournalFile } = await import('../src/gateway/journal.ts');
+  const dir = tmpdir();
+  try {
+    const good = JSON.stringify({ decisionId: 'd1', status: 'sent', at: 1 });
+    const file = path.join(dir, 'x.jsonl');
+    fs.writeFileSync(file, `${good}\n{"decisionId":"d2","sta`);
+    assert.equal(readJournalFile(file).length, 1, 'the partial final line from a crash is ignored');
+    fs.writeFileSync(file, `{"decisionId":"d2","sta\n${good}\n`);
+    assert.throws(() => readJournalFile(file), /Invalid journal JSON at line 1/, 'mid-file corruption is not silently dropped');
+    fs.writeFileSync(file, `${good}\n{"decisionId":"d2","sta\n`);
+    assert.throws(() => readJournalFile(file), /line 2/, 'a complete (newline-terminated) bad line is corruption, not a crash tail');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

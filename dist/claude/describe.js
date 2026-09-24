@@ -53,34 +53,93 @@ export function looksFailed(tool, response) {
         return false;
     return FAIL_TEXT.test(stringifyResult(response).slice(0, 4000));
 }
-/**
- * The test or check suite a shell command runs, read from the FULL command
- * (summaries are clipped, and Claude often chains setup, fixes and the test
- * run into one command). The last runner in the command wins.
- */
-const RUNNERS = [
-    [/\b(npm|pnpm|yarn|bun) (run )?test\b/, 'npm test'],
-    [/\bnode --test\b/, 'node --test'],
-    [/\bnpx (vitest|jest|mocha|playwright test)\b|\b(vitest|jest|mocha)\b/, 'js tests'],
-    [/\bpytest\b|python3? -m (pytest|unittest)\b/, 'pytest'],
-    [/\bcargo (test|check|build|clippy)\b/, 'cargo'],
-    [/\bgo (test|vet|build)\b/, 'go'],
-    [/\b(npx )?tsc\b|\bnpm run (typecheck|build|lint)\b/, 'typecheck/build'],
-    [/\bmake (test|check)\b/, 'make test'],
-    [/\b(mvn|gradle|\.\/gradlew) (test|check|build)\b/, 'jvm'],
-    [/\b(rspec|bundle exec rspec|rake test)\b/, 'ruby tests'],
-    [/\bswift test\b|\bxcodebuild test\b/, 'swift tests'],
-];
+/** A conservative check identity: preserve directory, runner, flags, and test targets. */
 export function testRunner(tool, input) {
     if (tool !== 'Bash')
         return undefined;
-    const cmd = String((input ?? {}).command ?? '').toLowerCase();
-    let best;
-    for (const [re, name] of RUNNERS) {
-        for (const m of cmd.matchAll(new RegExp(re.source, 'g'))) {
-            if (!best || m.index >= best.at)
-                best = { at: m.index, name };
+    const i = (input ?? {});
+    let command = String(i.command ?? '');
+    // Ignore heredoc bodies (which can themselves contain apparent commands).
+    const lines = command.split('\n');
+    const kept = [];
+    let delimiter;
+    for (const line of lines) {
+        if (delimiter) {
+            if (line.trim() === delimiter)
+                delimiter = undefined;
+            continue;
         }
+        const here = line.match(/<<-?\s*['"]?(\w+)['"]?/);
+        if (here) {
+            delimiter = here[1];
+            kept.push(line.slice(0, here.index));
+        }
+        else
+            kept.push(line);
     }
-    return best?.name;
+    if (delimiter)
+        return undefined;
+    command = kept.join('\n').replace(/\s+2>&1(?=\s|$)/g, '');
+    // Dynamic shell state cannot establish an equivalent suite reliably.
+    if (/[$`]|\b(pushd|popd|eval|source|exec)\b/.test(command))
+        return undefined;
+    const segments = [];
+    let segment = '', quote = '', escaped = false;
+    for (let n = 0; n < command.length; n++) {
+        const c = command[n];
+        if (escaped) {
+            segment += c;
+            escaped = false;
+            continue;
+        }
+        if (c === '\\' && quote !== "'") {
+            segment += c;
+            escaped = true;
+            continue;
+        }
+        if (quote) {
+            segment += c;
+            if (c === quote)
+                quote = '';
+            continue;
+        }
+        if (c === "'" || c === '"') {
+            quote = c;
+            segment += c;
+            continue;
+        }
+        if (c === ';' || c === '\n' || (c === '&' && command[n + 1] === '&')) {
+            segments.push(segment.trim());
+            segment = '';
+            if (c === '&')
+                n++;
+            continue;
+        }
+        if (c === '&' || /[(){}]/.test(c))
+            return undefined;
+        segment += c;
+    }
+    if (quote || escaped)
+        return undefined;
+    segments.push(segment.trim());
+    const scope = [typeof i.cwd === 'string' ? i.cwd : '.'];
+    let check;
+    const runner = /^(?:(?:npm|pnpm|yarn|bun) (?:run )?(?:test|typecheck|build|lint)\b|node --test\b|(?:npx )?(?:vitest|jest|mocha|playwright test|tsc)\b|pytest\b|python3? -m (?:pytest|unittest)\b|cargo (?:test|check|build|clippy)\b|go (?:test|vet|build)\b|make (?:test|check)\b|(?:mvn|gradle|\.\/gradlew) (?:test|check|build)\b|(?:bundle exec )?rspec\b|rake test\b|swift test\b|xcodebuild test\b)/;
+    for (const raw of segments.filter(Boolean)) {
+        if (/^cd\s+/.test(raw)) {
+            scope.push(raw.slice(3).trim());
+            continue;
+        }
+        // A newline in a failed pipeline or a second check is ambiguous; do not
+        // attribute a compound command's success/failure to one selected suite.
+        if (!runner.test(raw))
+            continue;
+        if (check)
+            return undefined;
+        check = raw.replace(/\s+2>&1/g, '').replace(/\s+\|\s*(?:tail|head|cat|tee|grep|sed|awk|wc|less)\b.*$/, '').trim();
+        if (/[|<>]/.test(check))
+            return undefined;
+        check = JSON.stringify({ v: 2, scope: [...scope], command: check });
+    }
+    return check;
 }

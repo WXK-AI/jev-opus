@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { auditJournal, formatAudit } from './gateway/audit.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,7 +10,7 @@ import { CONFIG_DIR, CONFIG_ENV_FILE, PROJECT_ROOT, config } from './config.js';
 import { EFFORT_LEVELS, isEffort } from './effort.js';
 import { JevClient } from './jev/client.js';
 import { EffortRouter } from './router/router.js';
-import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, statusline } from './gateway/launch.js';
+import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, logToGateway, statusline } from './gateway/launch.js';
 import { inlineEffortSettings } from './gateway/display.js';
 import { createTrace } from './trace.js';
 import { c, fmtEffort, formatDecision, formatReport, Terminal } from './ui.js';
@@ -24,6 +25,7 @@ Usage:
 
   jev-opus claude [args…]      your normal interactive Claude Code, with "Opus 5.5 · Jev" selected in /model
   jev-opus gateway [--port n]  run the Jev gateway for VS Code / JetBrains / Agent SDK (ANTHROPIC_BASE_URL)
+  jev-opus audit [D-id] [--json]  inspect decisions, attempts, usage, and visual annotations
   jev-opus statusline          Claude Code statusLine command showing Jev's current effort
 
 Options:
@@ -61,7 +63,7 @@ async function main() {
     const argv = process.argv.slice(2);
     if (argv[0] === 'claude') {
         // Everything after `claude` belongs to Claude Code; routing bounds come from the config/env.
-        const trace = createTrace(config.traceDir);
+        const trace = createTrace(config.traceDir, logToGateway); // the TUI owns the terminal: log, don't print
         const jev = new JevClient();
         if (!jev.enabled)
             console.error(c.yellow('No Jev key (JEV_API_KEY or OPENROUTER_API_KEY) — routing with local heuristics (run `jev-opus init`).'));
@@ -97,6 +99,11 @@ async function main() {
         return void console.log(packageVersion());
     if (positionals[0] === 'init')
         return init();
+    if (positionals[0] === 'audit') {
+        const report = auditJournal(path.join(CONFIG_DIR, 'journal'), positionals[1]);
+        console.log(values.json ? JSON.stringify(report, null, 2) : formatAudit(report));
+        return;
+    }
     const bounds = { min: effortArg('min', values.min, config.minEffort), max: effortArg('max', values.max, config.maxEffort) };
     const pinned = values.effort ? effortArg('effort', values.effort, 'medium') : null;
     const jev = values['no-jev'] ? null : new JevClient();
@@ -186,7 +193,7 @@ async function gateway(jev, bounds, port) {
         console.log(c.dim(`  ${k}=${v}`));
     console.log(c.dim(`then pick "Opus 5.5 · Jev" in /model (or --model ${JEV_MODEL_ID}). Ctrl-C to stop.`));
     console.log(c.dim('For inline effort badges, merge these session hooks into your Claude Code settings (valid while this gateway runs):'));
-    console.log(JSON.stringify(inlineEffortSettings(url + gw.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES === '1' }), null, 2));
+    console.log(JSON.stringify(inlineEffortSettings(url + gw.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES !== '0' }), null, 2));
     await new Promise((resolve) => process.once('SIGINT', resolve));
     await gw.close();
 }

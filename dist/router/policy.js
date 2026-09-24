@@ -1,6 +1,6 @@
 import { clampEffort, fromRank, rank } from '../effort.js';
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v2';
+export const POLICY_VERSION = 'policy.v2.1';
 /** Misordered bounds are a configuration error: swap them rather than crash. */
 export function normalizeBounds(b) {
     return rank(b.min) <= rank(b.max) ? b : { min: b.max, max: b.min };

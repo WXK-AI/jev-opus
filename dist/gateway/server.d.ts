@@ -15,8 +15,8 @@ import { type Message } from './transcript.ts';
  * transformation instead of routing twice. Every prepared transformation is
  * written to a durable JSONL journal before it is forwarded upstream, so a
  * thread-cache eviction or a gateway restart replays exactly the statements the
- * upstream model saw. A bounded copy of each routed response is parsed for
- * usage and journaled against the decision ID.
+ * upstream model saw. Response metadata is parsed incrementally and
+ * journaled against distinct request attempts and their shared decision ID.
  */
 export interface GatewayOptions {
     jev: JevLike | null;
@@ -36,6 +36,8 @@ export declare class JevGateway {
     /** Ephemeral local endpoint; hook payloads are never forwarded upstream. */
     readonly displayHookPath: string;
     private readonly display;
+    private auditDegraded;
+    private readonly auditWarned;
     private readonly opts;
     private readonly upstream;
     private readonly journal;
@@ -45,14 +47,7 @@ export declare class JevGateway {
     listen(): Promise<string>;
     close(): Promise<void>;
     private handle;
-    /**
-     * Tee a bounded copy of a routed response for usage telemetry. The stream
-     * pipes to the client unchanged — listeners only observe the bytes that flow,
-     * so backpressure is preserved. The final journal status is `completed` when
-     * the stream ends cleanly under an OK status, `failed` on an upstream error
-     * status or a stream error, and `unknown` when the client went away first
-     * (acceptance unknown).
-     */
+    /** Parse metadata incrementally while passing the response through unchanged. */
     private attachTelemetry;
     /**
      * Single-flight per branch: an identical request (same boundary fingerprint)
@@ -75,6 +70,7 @@ export declare class JevGateway {
      * trajectory) from the surviving branch, without ever storing prompt text.
      */
     private restore;
+    private publishDecision;
     private journalAppend;
     private thread;
     /** effort path of the current prompt per session, shown live in the status line */

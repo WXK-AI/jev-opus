@@ -13,7 +13,7 @@ export interface Bounds {
     max: Effort;
 }
 /** Version of this policy, recorded on every decision for provenance. */
-export declare const POLICY_VERSION = "policy.v2";
+export declare const POLICY_VERSION = "policy.v2.1";
 /** Misordered bounds are a configuration error: swap them rather than crash. */
 export declare function normalizeBounds(b: Bounds): Bounds;
 export declare function difficultyRank(d: number): number;

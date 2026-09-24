@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 export function isJournalRecord(line) {
-    return typeof line.requestFingerprint === 'string';
+    return !!line && typeof line === 'object' && typeof line.requestFingerprint === 'string';
 }
 export class Journal {
     dir;
@@ -21,7 +21,7 @@ export class Journal {
         }
         catch { /* best effort */ }
         const file = this.file(key);
-        fs.appendFileSync(file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+        fs.appendFileSync(file, `${JSON.stringify({ schemaVersion: 2, eventId: randomUUID(), ...line })}\n`, { mode: 0o600, flush: true });
         try {
             fs.chmodSync(file, 0o600);
         }
@@ -29,45 +29,106 @@ export class Journal {
     }
     /**
      * All decisions for a conversation, in append order, with later status/usage
-     * lines folded onto their record. Malformed lines are skipped.
+     * lines folded onto their record. Corrupt records fail recovery explicitly.
      */
     records(key) {
-        let raw;
+        return foldJournal(this.events(key));
+    }
+    events(key) {
+        return readJournalFile(this.file(key));
+    }
+}
+export function readJournalFile(file) {
+    let raw;
+    try {
+        raw = fs.readFileSync(file, 'utf8');
+    }
+    catch (err) {
+        if (err.code === 'ENOENT')
+            return [];
+        throw err;
+    }
+    const lines = raw.split('\n');
+    // A crash during an append leaves at most one partial line, at the very end
+    // (no trailing newline). Skip that one; corruption anywhere else still fails.
+    const truncatedTail = !raw.endsWith('\n') && lines.length > 0;
+    const lastIndex = lines.length - 1;
+    return lines.flatMap((line, index) => (line.trim() ? [{ line, index }] : [])).flatMap(({ line, index }) => {
+        let value;
         try {
-            raw = fs.readFileSync(this.file(key), 'utf8');
+            value = JSON.parse(line);
         }
         catch {
-            return [];
+            if (truncatedTail && index === lastIndex)
+                return [];
+            throw new Error(`Invalid journal JSON at line ${index + 1}`);
         }
-        const out = [];
-        const byId = new Map();
-        for (const line of raw.split('\n')) {
-            if (!line.trim())
-                continue;
-            let parsed;
-            try {
-                parsed = JSON.parse(line);
+        if (!value || typeof value !== 'object' || typeof value.decisionId !== 'string') {
+            throw new Error(`Invalid journal event at line ${index + 1}`);
+        }
+        return [value];
+    });
+}
+/** Recovery projection with per-attempt accounting. Raw annotations remain available via events(). */
+export function foldJournal(lines) {
+    const byId = new Map();
+    for (const line of lines) {
+        if (isJournalRecord(line)) {
+            byId.set(line.decisionId, { ...line, attempts: [] });
+            continue;
+        }
+        if ('event' in line)
+            continue;
+        const rec = byId.get(line.decisionId);
+        if (!rec)
+            continue;
+        rec.status = line.status;
+        rec.updatedAt = line.at;
+        if (line.attemptId) {
+            let attempt = rec.attempts.find((a) => a.attemptId === line.attemptId);
+            if (!attempt) {
+                attempt = { attemptId: line.attemptId, status: line.status, sentAt: line.at };
+                rec.attempts.push(attempt);
             }
-            catch {
-                continue;
-            }
-            if (isJournalRecord(parsed)) {
-                const rec = { ...parsed };
-                byId.set(rec.decisionId, rec);
-                out.push(rec);
-            }
-            else {
-                const rec = byId.get(parsed.decisionId);
-                if (!rec)
-                    continue;
-                rec.status = parsed.status;
-                rec.at = parsed.at;
-                if (parsed.usage)
-                    rec.usage = parsed.usage;
-                if (parsed.error)
-                    rec.error = parsed.error;
+            attempt.status = line.status;
+            if (line.status !== 'sent')
+                attempt.completedAt = line.at;
+            if (line.usage)
+                attempt.usage = line.usage;
+            if (line.error)
+                attempt.error = line.error;
+            if (line.responseId)
+                attempt.responseId = line.responseId;
+            if (line.providerRequestId)
+                attempt.providerRequestId = line.providerRequestId;
+            if (line.usageComplete !== undefined)
+                attempt.usageComplete = line.usageComplete;
+            rec.usage = sumUsage([rec.legacyUsage, ...rec.attempts.map((a) => a.usage)]);
+        }
+        else {
+            // Legacy events lack attempt identity: retain their original projection,
+            // never invent retry attribution or claim complete attempt coverage.
+            if (line.usage) {
+                rec.legacyUsage = line.usage;
+                rec.usage = sumUsage([rec.legacyUsage, ...rec.attempts.map((a) => a.usage)]);
             }
         }
-        return out;
+        if (line.error)
+            rec.error = line.error;
+        else if (line.status === 'completed')
+            delete rec.error;
     }
+    return [...byId.values()];
+}
+function sumUsage(values) {
+    const found = values.filter((v) => !!v);
+    if (!found.length)
+        return undefined;
+    const result = { model: found.at(-1).model, stopReason: found.at(-1).stopReason };
+    for (const key of ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens']) {
+        const counts = found.map((v) => v[key]).filter((v) => v !== undefined);
+        if (counts.length)
+            result[key] = counts.reduce((a, b) => a + b, 0);
+    }
+    return result;
 }

@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Effort } from '../effort.ts';
 import type { RouterSnapshot } from '../router/router.ts';
-import type { TaskProfile } from '../router/types.ts';
+import type { EffortDecision, TaskProfile } from '../router/types.ts';
 import type { Insertion } from './transcript.ts';
 
 /**
@@ -37,6 +37,12 @@ export interface JournalUsage {
 
 export interface JournalRecord {
   decisionId: string;
+  /** Complete sanitized routing explanation; absent in legacy journals. */
+  decision?: EffortDecision;
+  bounds?: { min: Effort; max: Effort };
+  attempts?: JournalAttempt[];
+  legacyUsage?: JournalUsage;
+  updatedAt?: number;
   /** hash of canonical messages[0..lastUser] + model + top-level output_config */
   requestFingerprint: string;
   /** index of the user message this boundary governs */
@@ -66,8 +72,37 @@ export interface JournalRecord {
   error?: string;
 }
 
+export interface JournalAttempt {
+  attemptId: string;
+  status: JournalStatus;
+  sentAt: number;
+  completedAt?: number;
+  usage?: JournalUsage;
+  error?: string;
+  responseId?: string;
+  providerRequestId?: string;
+  usageComplete?: boolean;
+}
+
+export interface JournalAnnotation {
+  event: 'annotation_returned';
+  decisionId: string;
+  attemptId?: string;
+  at: number;
+  badge: string;
+  hook: string;
+  messageId?: string;
+  turnId?: string;
+  toolUseId?: string;
+  association: 'tool-id' | 'session-latest';
+}
+
 /** Status/usage transition appended under an existing decisionId. */
 export interface JournalUpdate {
+  attemptId?: string;
+  responseId?: string;
+  providerRequestId?: string;
+  usageComplete?: boolean;
   decisionId: string;
   status: JournalStatus;
   at: number;
@@ -75,10 +110,10 @@ export interface JournalUpdate {
   error?: string;
 }
 
-export type JournalLine = JournalRecord | JournalUpdate;
+export type JournalLine = JournalRecord | JournalUpdate | JournalAnnotation;
 
 export function isJournalRecord(line: JournalLine): line is JournalRecord {
-  return typeof (line as JournalRecord).requestFingerprint === 'string';
+  return !!line && typeof line === 'object' && typeof (line as JournalRecord).requestFingerprint === 'string';
 }
 
 export class Journal {
@@ -98,44 +133,90 @@ export class Journal {
     fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(this.dir, 0o700); } catch { /* best effort */ }
     const file = this.file(key);
-    fs.appendFileSync(file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+    fs.appendFileSync(file, `${JSON.stringify({ schemaVersion: 2, eventId: randomUUID(), ...line })}\n`, { mode: 0o600, flush: true });
     try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
   }
 
   /**
    * All decisions for a conversation, in append order, with later status/usage
-   * lines folded onto their record. Malformed lines are skipped.
+   * lines folded onto their record. Corrupt records fail recovery explicitly.
    */
   records(key: string): JournalRecord[] {
-    let raw: string;
-    try {
-      raw = fs.readFileSync(this.file(key), 'utf8');
-    } catch {
-      return [];
-    }
-    const out: JournalRecord[] = [];
-    const byId = new Map<string, JournalRecord>();
-    for (const line of raw.split('\n')) {
-      if (!line.trim()) continue;
-      let parsed: JournalLine;
-      try {
-        parsed = JSON.parse(line) as JournalLine;
-      } catch {
-        continue;
-      }
-      if (isJournalRecord(parsed)) {
-        const rec = { ...parsed };
-        byId.set(rec.decisionId, rec);
-        out.push(rec);
-      } else {
-        const rec = byId.get(parsed.decisionId);
-        if (!rec) continue;
-        rec.status = parsed.status;
-        rec.at = parsed.at;
-        if (parsed.usage) rec.usage = parsed.usage;
-        if (parsed.error) rec.error = parsed.error;
-      }
-    }
-    return out;
+    return foldJournal(this.events(key));
   }
+
+  events(key: string): JournalLine[] {
+    return readJournalFile(this.file(key));
+  }
+}
+
+export function readJournalFile(file: string): JournalLine[] {
+  let raw: string;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []; throw err; }
+  const lines = raw.split('\n');
+  // A crash during an append leaves at most one partial line, at the very end
+  // (no trailing newline). Skip that one; corruption anywhere else still fails.
+  const truncatedTail = !raw.endsWith('\n') && lines.length > 0;
+  const lastIndex = lines.length - 1;
+  return lines.flatMap((line, index) => (line.trim() ? [{ line, index }] : [])).flatMap(({ line, index }) => {
+    let value: unknown;
+    try { value = JSON.parse(line); } catch {
+      if (truncatedTail && index === lastIndex) return [];
+      throw new Error(`Invalid journal JSON at line ${index + 1}`);
+    }
+    if (!value || typeof value !== 'object' || typeof (value as JournalLine).decisionId !== 'string') {
+      throw new Error(`Invalid journal event at line ${index + 1}`);
+    }
+    return [value as JournalLine];
+  });
+}
+
+/** Recovery projection with per-attempt accounting. Raw annotations remain available via events(). */
+export function foldJournal(lines: JournalLine[]): JournalRecord[] {
+  const byId = new Map<string, JournalRecord>();
+  for (const line of lines) {
+    if (isJournalRecord(line)) {
+      byId.set(line.decisionId, { ...line, attempts: [] });
+      continue;
+    }
+    if ('event' in line) continue;
+    const rec = byId.get(line.decisionId);
+    if (!rec) continue;
+    rec.status = line.status;
+    rec.updatedAt = line.at;
+    if (line.attemptId) {
+      let attempt = rec.attempts!.find((a) => a.attemptId === line.attemptId);
+      if (!attempt) {
+        attempt = { attemptId: line.attemptId, status: line.status, sentAt: line.at };
+        rec.attempts!.push(attempt);
+      }
+      attempt.status = line.status;
+      if (line.status !== 'sent') attempt.completedAt = line.at;
+      if (line.usage) attempt.usage = line.usage;
+      if (line.error) attempt.error = line.error;
+      if (line.responseId) attempt.responseId = line.responseId;
+      if (line.providerRequestId) attempt.providerRequestId = line.providerRequestId;
+      if (line.usageComplete !== undefined) attempt.usageComplete = line.usageComplete;
+      rec.usage = sumUsage([rec.legacyUsage, ...rec.attempts!.map((a) => a.usage)]);
+    } else {
+      // Legacy events lack attempt identity: retain their original projection,
+      // never invent retry attribution or claim complete attempt coverage.
+      if (line.usage) { rec.legacyUsage = line.usage; rec.usage = sumUsage([rec.legacyUsage, ...rec.attempts!.map((a) => a.usage)]); }
+    }
+    if (line.error) rec.error = line.error;
+    else if (line.status === 'completed') delete rec.error;
+  }
+  return [...byId.values()];
+}
+
+function sumUsage(values: Array<JournalUsage | undefined>): JournalUsage | undefined {
+  const found = values.filter((v): v is JournalUsage => !!v);
+  if (!found.length) return undefined;
+  const result: JournalUsage = { model: found.at(-1)!.model, stopReason: found.at(-1)!.stopReason };
+  for (const key of ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'] as const) {
+    const counts = found.map((v) => v[key]).filter((v): v is number => v !== undefined);
+    if (counts.length) result[key] = counts.reduce((a, b) => a + b, 0);
+  }
+  return result;
 }

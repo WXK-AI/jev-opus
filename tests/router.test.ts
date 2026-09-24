@@ -404,7 +404,7 @@ test('commandKey ignores output plumbing so a piped rerun clears the same issue'
   const { commandKey } = await import('../src/router/state.ts');
   const k = (summary: string) => commandKey({ tool: 'Bash', summary, failed: false, result: '' });
   assert.equal(k('npm test 2>&1 | tail -30'), k('npm test'));
-  assert.equal(k('cd app && npm test | grep -E "pass|fail"'), k('npm test'));
+  assert.notEqual(k('cd app && npm test | grep -E "pass|fail"'), k('npm test'));
   assert.equal(k('npm test > /dev/null 2>&1'), k('npm test'));
   assert.notEqual(k('npm run lint'), k('npm test'));
 });
@@ -465,4 +465,22 @@ test('live repro: a different command that reruns the same suite and passes reso
   assert.equal(fail.effort, 'high');
   const pass = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: "sed -i '' -e 's/return y % 4…' dates.js && npm test", failed: false, result: '# pass 3 # fail 0', runner: 'npm test' }], 2));
   assert.equal(pass.effort, 'medium', 'same suite passing resolves the issue and releases the escalation');
+});
+
+test('actual date-debug session: grep-filtered setup and repair resolve the same suite', async () => {
+  const fs = await import('node:fs');
+  const { testRunner, describeToolInput } = await import('../src/claude/describe.ts');
+  const commands = JSON.parse(fs.readFileSync(new URL('./fixtures/date-debug-commands.json', import.meta.url),'utf8')) as string[];
+  const batch = (index: number, failed: boolean) => [{tool:'Bash',summary:describeToolInput('Bash',{command:commands[index]}),runner:testRunner('Bash',{command:commands[index]}),failed,result:failed?'# fail 3':'# pass 3\n# fail 0'}];
+  assert.ok(batch(0,true)[0].runner);
+  assert.equal(batch(0,true)[0].runner,batch(1,false)[0].runner);
+  const router = new EffortRouter({jev:null,bounds:{min:'medium',max:'high'}});
+  const start = await router.routeTask('debug the failing date tests', 'medium');
+  const ctx = {prompt:'debug the failing date tests',profile:start.profile!,assistantNote:'',trajectory:[]};
+  const raised = await router.routeStep({...ctx,turn:1,current:start.effort,consecutiveFailures:1,lastBatch:batch(0,true)});
+  const recovered = await router.routeStep({...ctx,turn:2,current:raised.effort,consecutiveFailures:0,lastBatch:batch(1,false)});
+  assert.equal(raised.effort,'high');
+  assert.equal(recovered.effort,'medium');
+  assert.ok(recovered.reasons.some(r=>r.includes('now passes')));
+  assert.equal(issues(router).length,0);
 });

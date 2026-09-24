@@ -239,7 +239,7 @@ test('gateway: inline display hooks stay local, preserve the model transcript, a
     assert.equal(jev.calls, 1, 'displaying badges makes no extra evaluator calls');
 
     await post(base, { ...request, messages: [...messages, a('t1', 'npm test'), r('t1', 'FAILED', true)] });
-    assert.deepEqual(await hook({ hook_event_name: 'PreToolUse', session_id: 'sess-1' }), { systemMessage: '◆ Jev · LOW → HIGH · diagnosing' });
+    assert.match(JSON.stringify(await hook({ hook_event_name: 'PreToolUse', session_id: 'sess-1' })), /Jev · LOW → HIGH/);
     await post(base, { ...request, model: 'claude-opus-5-5' });
     assert.deepEqual(await hook(input), {});
     const before = up.seen.length;

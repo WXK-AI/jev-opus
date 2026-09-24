@@ -1,6 +1,6 @@
 import type { Effort } from '../effort.ts';
 import type { RouterSnapshot } from '../router/router.ts';
-import type { TaskProfile } from '../router/types.ts';
+import type { EffortDecision, TaskProfile } from '../router/types.ts';
 import type { Insertion } from './transcript.ts';
 /**
  * Durable, append-only decision journal.
@@ -30,6 +30,15 @@ export interface JournalUsage {
 }
 export interface JournalRecord {
     decisionId: string;
+    /** Complete sanitized routing explanation; absent in legacy journals. */
+    decision?: EffortDecision;
+    bounds?: {
+        min: Effort;
+        max: Effort;
+    };
+    attempts?: JournalAttempt[];
+    legacyUsage?: JournalUsage;
+    updatedAt?: number;
     /** hash of canonical messages[0..lastUser] + model + top-level output_config */
     requestFingerprint: string;
     /** index of the user message this boundary governs */
@@ -58,15 +67,42 @@ export interface JournalRecord {
     usage?: JournalUsage;
     error?: string;
 }
+export interface JournalAttempt {
+    attemptId: string;
+    status: JournalStatus;
+    sentAt: number;
+    completedAt?: number;
+    usage?: JournalUsage;
+    error?: string;
+    responseId?: string;
+    providerRequestId?: string;
+    usageComplete?: boolean;
+}
+export interface JournalAnnotation {
+    event: 'annotation_returned';
+    decisionId: string;
+    attemptId?: string;
+    at: number;
+    badge: string;
+    hook: string;
+    messageId?: string;
+    turnId?: string;
+    toolUseId?: string;
+    association: 'tool-id' | 'session-latest';
+}
 /** Status/usage transition appended under an existing decisionId. */
 export interface JournalUpdate {
+    attemptId?: string;
+    responseId?: string;
+    providerRequestId?: string;
+    usageComplete?: boolean;
     decisionId: string;
     status: JournalStatus;
     at: number;
     usage?: JournalUsage;
     error?: string;
 }
-export type JournalLine = JournalRecord | JournalUpdate;
+export type JournalLine = JournalRecord | JournalUpdate | JournalAnnotation;
 export declare function isJournalRecord(line: JournalLine): line is JournalRecord;
 export declare class Journal {
     readonly dir: string;
@@ -76,7 +112,11 @@ export declare class Journal {
     append(key: string, line: JournalLine): void;
     /**
      * All decisions for a conversation, in append order, with later status/usage
-     * lines folded onto their record. Malformed lines are skipped.
+     * lines folded onto their record. Corrupt records fail recovery explicitly.
      */
     records(key: string): JournalRecord[];
+    events(key: string): JournalLine[];
 }
+export declare function readJournalFile(file: string): JournalLine[];
+/** Recovery projection with per-attempt accounting. Raw annotations remain available via events(). */
+export declare function foldJournal(lines: JournalLine[]): JournalRecord[];

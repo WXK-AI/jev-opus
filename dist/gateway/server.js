@@ -6,19 +6,20 @@ import { Readable } from 'node:stream';
 import { STEP_SET_VERSION, TASK_SET_VERSION } from '../router/questions.js';
 import { EffortRouter } from '../router/router.js';
 import { isEffort } from '../effort.js';
-import { EffortDisplay } from './display.js';
+import { ResponseTelemetry } from './telemetry.js';
+import { EffortDisplay, displayMode } from './display.js';
 import { Journal } from './journal.js';
 import { addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt, lastToolRound, prefixHashes, requestFingerprint, stripJevModel, userText, } from './transcript.js';
 const HOP_BY_HOP = new Set(['host', 'connection', 'content-length', 'accept-encoding', 'transfer-encoding', 'keep-alive', 'proxy-connection', 'upgrade']);
 const DROP_RESPONSE = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive']);
 const POLICY_VERSION = `gateway.v1+${TASK_SET_VERSION}+${STEP_SET_VERSION}`;
-/** cap on the tee'd copy of a routed response kept for usage parsing */
-const TELEMETRY_CAP = 256 * 1024;
 const PREPARED_CAP = 512;
 export class JevGateway {
     /** Ephemeral local endpoint; hook payloads are never forwarded upstream. */
     displayHookPath = `/_jev/hooks/${randomUUID()}`;
-    display = new EffortDisplay();
+    display;
+    auditDegraded = false;
+    auditWarned = new Set();
     opts;
     upstream;
     journal;
@@ -26,6 +27,7 @@ export class JevGateway {
     server = null;
     constructor(opts) {
         this.opts = opts;
+        this.display = new EffortDisplay(256, displayMode(), (key, event) => this.journalAppend(key, event));
         this.upstream = (opts.upstream ?? 'https://api.anthropic.com').replace(/\/+$/, '');
         this.journal = opts.journalDir ? new Journal(opts.journalDir) : null;
     }
@@ -62,10 +64,18 @@ export class JevGateway {
                 chunks.push(c);
             }
             let output = {};
+            let hookInput;
             try {
-                output = this.display.handle(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+                hookInput = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                output = this.display.handle(hookInput);
             }
             catch { /* invalid hook: no UI change */ }
+            if (this.auditDegraded && typeof hookInput?.session_id === 'string' && !this.auditWarned.has(hookInput.session_id)) {
+                output.systemMessage = `${output.systemMessage ?? ''} ◆ Jev · audit logging degraded; check gateway.log`.trim();
+                this.auditWarned.add(hookInput.session_id);
+                if (this.auditWarned.size > 256)
+                    this.auditWarned.delete(this.auditWarned.values().next().value);
+            }
             res.writeHead(200, { 'content-type': 'application/json' });
             res.end(JSON.stringify(output));
             return;
@@ -97,10 +107,8 @@ export class JevGateway {
                 const shape = Array.isArray(parsed.messages)
                     ? parsed.messages.map((m) => `${m.role}${m.output_config ? `{${JSON.stringify(m.output_config)}}` : ''}[${Array.isArray(m.content) ? m.content.map((b) => b.type).join('+') : typeof m.content}]`).join(' ')
                     : '';
-                const lastMsg = Array.isArray(parsed.messages) ? parsed.messages.at(-1) : undefined;
-                const lastText = lastMsg ? JSON.stringify(lastMsg.content).slice(0, 160) : '';
                 const hdrs = Object.keys(headers).filter((h) => h.startsWith('x-') || h.startsWith('anthropic-')).join(',');
-                this.opts.onNotice?.(`debug headers=${hdrs} last=${lastText}`);
+                this.opts.onNotice?.(`debug headers=${hdrs}`);
                 this.opts.onNotice?.(`debug ${pathname} model=${String(parsed.model)} messages=${msgs} tools=${tools} session=${headers['x-claude-code-session-id'] ?? '-'} agent=${headers['x-claude-code-agent-id'] ?? '-'} top=${JSON.stringify(parsed.output_config ?? null)} beta=${headers['anthropic-beta'] ?? ''} :: ${shape}`);
             }
             if (parsed && isJevModel(parsed.model)) {
@@ -108,8 +116,8 @@ export class JevGateway {
                 if (pathname === '/v1/messages' && Array.isArray(parsed.messages) && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
                     const routed = await this.route(headers, parsed);
                     parsed.messages = routed.messages;
-                    if (routed.decisionId && routed.key)
-                        telem = { key: routed.key, decisionId: routed.decisionId };
+                    if (routed.decisionId && routed.key && routed.decision)
+                        telem = { key: routed.key, decisionId: routed.decisionId, attemptId: randomUUID(), decision: routed.decision, session: headers['x-claude-code-session-id'] ?? 'no-session', agent: headers['x-claude-code-agent-id'] ?? 'main' };
                     headers['anthropic-beta'] = addBeta(headers['anthropic-beta']);
                 }
                 body = Buffer.from(JSON.stringify(parsed));
@@ -120,8 +128,11 @@ export class JevGateway {
             }
         }
         // The request is on its way: mark the prepared decision as sent before dispatch.
-        if (telem)
-            this.journalAppend(telem.key, { decisionId: telem.decisionId, status: 'sent', at: Date.now() });
+        if (telem) {
+            // Telemetry, not recovery: the prepared record was already persisted (required) in decide().
+            this.journalAppend(telem.key, { decisionId: telem.decisionId, attemptId: telem.attemptId, status: 'sent', at: Date.now() });
+            this.display.record(telem.session, telem.agent, telem.decision, telem);
+        }
         const controller = new AbortController();
         res.on('close', () => { if (!res.writableFinished)
             controller.abort(); });
@@ -137,7 +148,7 @@ export class JevGateway {
         }
         catch (err) {
             if (telem)
-                this.journalAppend(telem.key, { decisionId: telem.decisionId, status: 'failed', at: Date.now(), error: err.message });
+                this.journalAppend(telem.key, { decisionId: telem.decisionId, attemptId: telem.attemptId, status: 'failed', at: Date.now(), error: 'transport_error' });
             throw err;
         }
         const outHeaders = {};
@@ -155,7 +166,7 @@ export class JevGateway {
         res.writeHead(up.status, outHeaders);
         if (!up.body) {
             if (telem)
-                this.journalAppend(telem.key, { decisionId: telem.decisionId, status: up.ok ? 'completed' : 'failed', at: Date.now() });
+                this.journalAppend(telem.key, { decisionId: telem.decisionId, attemptId: telem.attemptId, status: up.ok ? 'unknown' : 'failed', at: Date.now(), usageComplete: false });
             return void res.end();
         }
         const stream = Readable.fromWeb(up.body);
@@ -163,48 +174,31 @@ export class JevGateway {
             this.attachTelemetry(stream, telem, up, res, controller);
         stream.pipe(res);
     }
-    /**
-     * Tee a bounded copy of a routed response for usage telemetry. The stream
-     * pipes to the client unchanged — listeners only observe the bytes that flow,
-     * so backpressure is preserved. The final journal status is `completed` when
-     * the stream ends cleanly under an OK status, `failed` on an upstream error
-     * status or a stream error, and `unknown` when the client went away first
-     * (acceptance unknown).
-     */
+    /** Parse metadata incrementally while passing the response through unchanged. */
     attachTelemetry(stream, telem, up, res, controller) {
-        // message_start (input/cache usage) arrives first and message_delta (final
-        // output usage, stop_reason) arrives last, so keep a bounded head AND a
-        // rolling tail: a long response, like a large file write, can't push the
-        // final usage out of the copy.
-        const head = [];
-        let headSize = 0;
-        const tail = [];
-        let tailSize = 0;
+        const parser = new ResponseTelemetry(up.headers.get('content-type') ?? '', (id) => {
+            this.display.bindTool(telem.session, telem.agent, id, telem.decision, telem);
+        }, () => this.display.markText(telem.session, telem.agent, telem));
         let done = false;
         const finish = (streamOk) => {
             if (done)
                 return;
             done = true;
+            parser.end();
             const clientGone = controller.signal.aborted || (res.destroyed && !res.writableFinished);
-            const status = clientGone ? 'unknown' : streamOk && up.ok ? 'completed' : 'failed';
-            // The tail may start mid-event; the parser skips unparseable fragments.
-            const copy = tailSize ? Buffer.concat([...head, Buffer.from('\n\n'), ...tail]) : Buffer.concat(head);
-            const usage = responseUsage(up.headers.get('content-type') ?? '', copy);
-            this.journalAppend(telem.key, { decisionId: telem.decisionId, status, at: Date.now(), ...(usage ? { usage } : {}) });
+            const status = parser.error || !up.ok ? 'failed'
+                : clientGone ? 'unknown' : !streamOk ? 'failed' : parser.complete ? 'completed' : 'unknown';
+            this.journalAppend(telem.key, {
+                decisionId: telem.decisionId, attemptId: telem.attemptId, status, at: Date.now(),
+                usage: Object.keys(parser.usage).length ? parser.usage : undefined,
+                usageComplete: status === 'completed' && parser.usageComplete,
+                responseId: parser.responseId, providerRequestId: up.headers.get('request-id') ?? undefined,
+                error: parser.error ?? (!up.ok ? `http_${up.status}` : undefined),
+            });
         };
-        stream.on('data', (c) => {
-            if (headSize < TELEMETRY_CAP / 2) {
-                head.push(c);
-                headSize += c.length;
-                return;
-            }
-            tail.push(c);
-            tailSize += c.length;
-            while (tailSize > TELEMETRY_CAP / 2 && tail.length > 1)
-                tailSize -= tail.shift().length;
-        });
+        stream.on('data', (chunk) => parser.push(chunk));
         stream.on('end', () => finish(true));
-        stream.on('error', () => finish(false));
+        stream.on('error', () => { finish(false); res.destroy(); });
         res.on('close', () => finish(false));
     }
     /**
@@ -248,7 +242,7 @@ export class JevGateway {
     }
     /** Apply a prepared transformation to a request's messages (retry-safe). */
     replay(p, key, messages, hashes) {
-        return { messages: applyInsertions(messages, validInsertions(p.insertions, messages, hashes)), decisionId: p.decisionId, key };
+        return { messages: applyInsertions(messages, validInsertions(p.insertions, messages, hashes)), decisionId: p.decisionId, decision: p.decision, key };
     }
     /**
      * Runs inside the thread's queue: restores the common-ancestor state when the
@@ -283,14 +277,13 @@ export class JevGateway {
                 kind: prompting ? 'task' : 'step', effort: t.effort, previous: current,
                 changed: t.effort !== current, reasons: ['manual override'], source: 'pinned', jevLatencyMs: 0,
             };
-            this.display.record(session, agent, manual);
-            this.writeStatus(session, agent, manual);
-            const rec = this.journalRecord(t, fp, lastUser, hashes, manual.effort, prompting ? 'task' : 'step', current);
+            const rec = this.journalRecord(t, fp, lastUser, hashes, manual.effort, prompting ? 'task' : 'step', current, manual);
             t.decidedAt = lastUser + 1;
-            this.journalAppend(key, rec);
+            this.journalAppend(key, rec, true);
+            this.publishDecision(session, agent, rec);
             t.records.push(rec);
             t.tip = rec;
-            return { decisionId: rec.decisionId, insertions: rec.insertions };
+            return { decisionId: rec.decisionId, decision: rec.decision, insertions: rec.insertions };
         }
         let decision;
         if (prompting || !t.profile) {
@@ -321,20 +314,19 @@ export class JevGateway {
         }
         t.effort = decision.effort;
         const final = { ...decision, previous: current, changed: decision.effort !== current };
-        this.display.record(session, agent, final);
-        this.opts.onDecision?.(session, final);
-        this.opts.trace?.({ event: 'gateway_decision', session, agent, index: lastUser, ...final });
-        this.writeStatus(session, agent, final);
-        const rec = this.journalRecord(t, fp, lastUser, hashes, final.effort, decision.kind, current);
+        const rec = this.journalRecord(t, fp, lastUser, hashes, final.effort, decision.kind, current, final);
         t.decidedAt = lastUser + 1;
-        this.journalAppend(key, rec);
+        this.journalAppend(key, rec, true);
+        this.publishDecision(session, agent, rec);
         t.records.push(rec);
         t.tip = rec;
-        return { decisionId: rec.decisionId, insertions: rec.insertions };
+        return { decisionId: rec.decisionId, decision: rec.decision, insertions: rec.insertions };
     }
-    journalRecord(t, fp, lastUser, hashes, effort, kind, current) {
+    journalRecord(t, fp, lastUser, hashes, effort, kind, current, decision) {
         return {
             decisionId: randomUUID(),
+            decision: { ...decision, jevError: decision.jevError ? 'evaluator_unavailable_or_invalid' : undefined },
+            bounds: { ...this.opts.bounds },
             requestFingerprint: fp,
             lastUser,
             boundaryHash: hashes[lastUser + 1],
@@ -389,14 +381,25 @@ export class JevGateway {
         t.effort = [...t.insertions].reverse().find((i) => i.index <= lastUser)?.effort ?? tip?.requested ?? null;
         t.tip = tip;
     }
-    journalAppend(key, line) {
+    publishDecision(session, agent, rec) {
+        const decision = rec.decision;
+        this.opts.onDecision?.(session, decision);
+        this.opts.trace?.({ event: 'gateway_decision', decisionId: rec.decisionId, session, agent, index: rec.lastUser, ...decision });
+        this.writeStatus(session, agent, decision);
+    }
+    journalAppend(key, line, required = false) {
         if (!this.journal)
             return;
         try {
             this.journal.append(key, line);
         }
         catch (err) {
+            this.auditDegraded = true;
             this.opts.onNotice?.(`journal write error: ${err.message}`);
+            if (required) {
+                this.threads.delete(key);
+                throw new Error('Cannot persist request audit record; request was not forwarded');
+            }
         }
     }
     thread(key, messages, hashes) {
@@ -418,7 +421,7 @@ export class JevGateway {
             try {
                 t.records = this.journal.records(key);
                 for (const rec of t.records) {
-                    t.prepared.set(rec.requestFingerprint, Promise.resolve({ decisionId: rec.decisionId, insertions: rec.insertions }));
+                    t.prepared.set(rec.requestFingerprint, Promise.resolve({ decisionId: rec.decisionId, decision: rec.decision ?? { kind: rec.kind, effort: rec.requested, previous: rec.current, changed: rec.requested !== rec.current, reasons: ['restored legacy decision'], source: rec.manual ? 'pinned' : 'local', jevLatencyMs: 0 }, insertions: rec.insertions }));
                 }
                 const tip = deepestBoundary(t.records, hashes);
                 if (tip) {
@@ -428,6 +431,7 @@ export class JevGateway {
             }
             catch (err) {
                 this.opts.onNotice?.(`journal read error: ${err.message}`);
+                throw new Error('Cannot read recovery journal; request was not forwarded');
             }
         }
         this.threads.set(key, t);
@@ -489,75 +493,6 @@ function deepestBoundary(records, hashes, beforeLastUser) {
             best = r;
     }
     return best;
-}
-/** Parse usage + stop_reason out of a bounded response copy (SSE or plain JSON). */
-function responseUsage(contentType, buf) {
-    const text = buf.toString('utf8');
-    if (contentType.includes('text/event-stream'))
-        return sseUsage(text);
-    if (contentType.includes('json'))
-        return bodyUsage(text);
-    return undefined;
-}
-function sseUsage(text) {
-    const usage = {};
-    let found = false;
-    for (const evt of text.split(/\r?\n\r?\n/)) {
-        for (const line of evt.split('\n')) {
-            if (!line.startsWith('data:'))
-                continue;
-            const data = line.slice(5).trim();
-            if (!data || data === '[DONE]')
-                continue;
-            let j;
-            try {
-                j = JSON.parse(data);
-            }
-            catch {
-                continue;
-            }
-            if (j.type === 'message_start' && j.message) {
-                found = true;
-                if (typeof j.message.model === 'string')
-                    usage.model = j.message.model;
-                mergeUsage(usage, j.message.usage);
-            }
-            else if (j.type === 'message_delta') {
-                found = true;
-                mergeUsage(usage, j.usage);
-                if (typeof j.delta?.stop_reason === 'string')
-                    usage.stopReason = j.delta.stop_reason;
-            }
-        }
-    }
-    return found ? usage : undefined;
-}
-function bodyUsage(text) {
-    try {
-        const j = JSON.parse(text);
-        const usage = {};
-        if (typeof j.model === 'string')
-            usage.model = j.model;
-        if (typeof j.stop_reason === 'string')
-            usage.stopReason = j.stop_reason;
-        mergeUsage(usage, j.usage);
-        return Object.keys(usage).length ? usage : undefined;
-    }
-    catch {
-        return undefined;
-    }
-}
-function mergeUsage(u, raw) {
-    if (!raw)
-        return;
-    if (typeof raw.input_tokens === 'number')
-        u.inputTokens = raw.input_tokens;
-    if (typeof raw.output_tokens === 'number')
-        u.outputTokens = raw.output_tokens;
-    if (typeof raw.cache_read_input_tokens === 'number')
-        u.cacheReadInputTokens = raw.cache_read_input_tokens;
-    if (typeof raw.cache_creation_input_tokens === 'number')
-        u.cacheCreationInputTokens = raw.cache_creation_input_tokens;
 }
 export function readStatus(statusDir, session) {
     if (!/^[\w-]+$/.test(session))

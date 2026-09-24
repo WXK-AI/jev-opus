@@ -1,94 +1,144 @@
 import type { Settings, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 import type { EffortDecision } from '../router/types.ts';
+import type { JournalAnnotation } from './journal.ts';
+
+export type DisplayMode = 'every-response' | 'changes' | 'off';
+export function displayMode(value = process.env.JEV_OPUS_DISPLAY): DisplayMode {
+  return value === 'changes' || value === 'off' ? value : 'every-response';
+}
+
+/** Plain-language labels for the policy's internal reason strings, most important first. */
+const REASON_LABELS: ReadonlyArray<[RegExp, string]> = [
+  [/failing check now passes/, 'matching checks passed'],
+  [/failed step|same failure|failing checks/, 'failing checks'],
+  [/stuck/, 'stuck, escalating'],
+  [/environment blocker/, 'environment issue, holding'],
+  [/unresolved issue/, 'unresolved failure, holding'],
+  [/bounded to/, 'at your effort limit'],
+  [/holding|→ hold|release hold/, 'holding after escalation'],
+  [/hard step/, 'hard next step'],
+  [/high stakes/, 'high stakes'],
+  [/trivial step/, 'routine step'],
+];
 
 export function formatEffortBadge(d: EffortDecision, showChange = true): string {
   const change = showChange && d.previous && d.previous !== d.effort ? `${d.previous.toUpperCase()} → ` : '';
-  const phase = d.source === 'pinned' ? 'manual override' : (d.signals?.phase ?? d.profile?.taskType ?? '').replaceAll('_', ' ');
+  const phase = (d.signals?.phase ?? d.profile?.taskType ?? '').replaceAll('_', ' ');
+  const label = d.source === 'pinned' ? 'manual override'
+    : d.kind === 'task' && d.profile ? d.profile.taskType.replaceAll('_', ' ')
+    : REASON_LABELS.find(([re]) => d.reasons.some((r) => re.test(r)))?.[1] ?? phase;
   const source = d.source === 'heuristic' ? ' · local routing' : '';
-  return `◆ Jev · ${change}${d.effort.toUpperCase()}${phase ? ` · ${phase}` : ''}${source}`;
+  return `◆ Jev · ${change}${d.effort.toUpperCase()}${label ? ` · ${label}` : ''}${source}`;
 }
 
-/** "LOW → MEDIUM → HIGH": every level since the last badge, oldest first. */
+/** Retrospective path, never presented as the effort for one response. */
 export function formatEffortTrail(trail: readonly string[], d: EffortDecision): string {
-  const path = trail.map((e) => e.toUpperCase()).join(' → ') || d.effort.toUpperCase();
-  const phase = d.source === 'pinned' ? 'manual override' : (d.signals?.phase ?? d.profile?.taskType ?? '').replaceAll('_', ' ');
-  return `◆ Jev · ${path}${phase ? ` · ${phase}` : ''}`;
+  return `◆ Jev · path ${trail.map((e) => e.toUpperCase()).join(' → ')} · now ${d.effort.toUpperCase()}`;
 }
 
+export interface DisplayContext {
+  key: string;
+  decisionId: string;
+  attemptId?: string;
+}
 interface Entry {
   decision: EffortDecision;
-  /** a new prompt started and its first message hasn't been badged yet */
+  context?: DisplayContext;
   announce: boolean;
-  /** levels in force since the last badge was shown, deduplicated in order */
-  trail: string[];
-  /** a tool notice was already emitted for the latest decision */
   noticed: boolean;
+  hasText?: boolean;
 }
 
-/**
- * UI state only. No hook output is added to Claude's model conversation.
- *
- * Effort usually changes during tool-only steps, where Claude writes no text.
- * Rather than a notice per change, the next text badge shows the whole path
- * since the previous badge (for example LOW → MEDIUM → HIGH), and the status
- * line shows the live level. Per-tool notices are opt-in.
- */
+/** Visual-only annotations. Text-hook association is explicitly inferred, tool IDs are exact. */
 export class EffortDisplay {
   private readonly entries = new Map<string, Entry>();
+  private readonly attempts = new Map<string, Entry>();
+  private readonly tools = new Map<string, Entry>();
+  private readonly messages = new Map<string, string>();
   private readonly maxEntries: number;
+  private readonly mode: DisplayMode;
+  private readonly showDecisionIds: boolean;
+  private readonly onAnnotation?: (key: string, event: JournalAnnotation) => void;
 
-  constructor(maxEntries = 256) {
+  constructor(maxEntries = 256, mode: DisplayMode = 'every-response', onAnnotation?: (key: string, event: JournalAnnotation) => void, showDecisionIds = process.env.JEV_OPUS_SHOW_DECISION_IDS === '1') {
     this.maxEntries = maxEntries;
+    this.mode = mode;
+    this.showDecisionIds = showDecisionIds;
+    this.onAnnotation = onAnnotation;
   }
 
-  record(session: string, agent: string, decision: EffortDecision): void {
+  record(session: string, agent: string, decision: EffortDecision, context?: DisplayContext): void {
     const key = JSON.stringify([session, agent]);
     const prior = this.entries.get(key);
-    const trail = prior ? [...prior.trail] : decision.previous ? [decision.previous] : [];
-    if (trail.at(-1) !== decision.effort) trail.push(decision.effort);
-    this.entries.delete(key);
-    this.entries.set(key, { decision, trail, noticed: false, announce: decision.kind === 'task' || (prior?.announce ?? true) });
-    while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
+    if (context?.attemptId && prior?.context?.attemptId === context.attemptId) return;
+    const entry = { decision, context, noticed: false, announce: decision.kind === 'task' || decision.changed };
+    this.set(this.entries, key, entry);
+    if (context?.attemptId) this.set(this.attempts, JSON.stringify([session, agent, context.attemptId]), entry);
+  }
+
+  bindTool(session: string, agent: string, id: string, decision: EffortDecision, context: DisplayContext): void {
+    const current = this.attempts.get(JSON.stringify([session, agent, context.attemptId]));
+    const entry = current?.context?.attemptId === context.attemptId ? current : { decision, context, noticed: false, announce: true };
+    this.set(this.tools, JSON.stringify([session, agent, id]), entry);
+  }
+
+  markText(session: string, agent: string, context: DisplayContext): void {
+    const entry = this.attempts.get(JSON.stringify([session, agent, context.attemptId]));
+    if (entry) entry.hasText = true;
   }
 
   clear(session: string, agent: string): void {
     this.entries.delete(JSON.stringify([session, agent]));
+    for (const map of [this.tools, this.messages, this.attempts]) for (const key of map.keys()) {
+      const ids = JSON.parse(key);
+      if (ids[0] === session && ids[1] === agent) map.delete(key);
+    }
+  }
+
+  private set<T>(map: Map<string, T>, key: string, value: T): void {
+    map.delete(key); map.set(key, value);
+    while (map.size > this.maxEntries * 8) map.delete(map.keys().next().value!);
   }
 
   handle(input: unknown): SyncHookJSONOutput {
-    if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+    if (this.mode === 'off' || !input || typeof input !== 'object' || Array.isArray(input)) return {};
     const i = input as Record<string, unknown>;
     if (typeof i.session_id !== 'string' || (i.agent_id !== undefined && typeof i.agent_id !== 'string')) return {};
-    const key = JSON.stringify([i.session_id, i.agent_id ?? 'main']);
-    const entry = this.entries.get(key);
+    const session = i.session_id, agent = i.agent_id ?? 'main';
+    const tool = typeof i.tool_use_id === 'string' ? this.tools.get(JSON.stringify([session, agent, i.tool_use_id])) : undefined;
+    const entry = tool ?? this.entries.get(JSON.stringify([session, agent]));
     if (!entry) return {};
-
-    if (i.hook_event_name === 'MessageDisplay') {
-      // Each message can stream many deltas. Prefix only its first delta;
-      // all subsequent text passes through exactly as Claude produced it.
-      if (i.index !== 0 || typeof i.delta !== 'string' || !i.delta) return {};
-      // Badge where it carries information: the first message of a prompt, and
-      // wherever the level changed since the last badge. The status line shows
-      // the steady state, so unchanged steps stay clean.
-      if (!entry.announce && entry.trail.length <= 1) return {};
-      entry.announce = false;
-      const badge = formatEffortTrail(entry.trail, entry.decision);
-      entry.trail = [entry.decision.effort]; // the next badge starts from the level now in force
-      entry.noticed = true; // this badge announced the change; no tool notice repeats it
-      return { hookSpecificOutput: { hookEventName: 'MessageDisplay', displayContent: `> **${badge}**\n\n${i.delta}` } };
+    const textHook = i.hook_event_name === 'MessageDisplay';
+    if (textHook && (i.index !== 0 || typeof i.delta !== 'string' || !i.delta)) return {};
+    if (!textHook && i.hook_event_name !== 'PreToolUse') return {};
+    const messageKey = textHook && typeof i.message_id === 'string'
+      ? JSON.stringify([session, agent, i.turn_id, i.message_id]) : undefined;
+    const cached = messageKey ? this.messages.get(messageKey) : undefined;
+    if (cached !== undefined) return cached ? { hookSpecificOutput: { hookEventName: 'MessageDisplay', displayContent: `> **${cached}**\n\n${i.delta}` } } : {};
+    const show = textHook ? this.mode === 'every-response' || entry.announce
+      : !entry.noticed && !entry.hasText && (this.mode === 'every-response' || entry.announce);
+    if (!show) { if (messageKey) this.set(this.messages, messageKey, ''); return {}; }
+    const badge = formatEffortBadge(entry.decision, entry.announce) + (this.showDecisionIds && entry.context ? ` · D-${entry.context.decisionId.slice(0, 8)}` : '');
+    if (messageKey) this.set(this.messages, messageKey, badge);
+    entry.announce = false;
+    entry.noticed = true;
+    if (entry.context) {
+      const id = (v: unknown) => typeof v === 'string' ? v.slice(0, 200) : undefined;
+      this.onAnnotation?.(entry.context.key, {
+        event: 'annotation_returned', decisionId: entry.context.decisionId, attemptId: entry.context.attemptId,
+        at: Date.now(), badge, hook: String(i.hook_event_name),
+        messageId: id(i.message_id), turnId: id(i.turn_id), toolUseId: id(i.tool_use_id),
+        association: tool ? 'tool-id' : 'session-latest',
+      });
     }
-
-    if (i.hook_event_name === 'PreToolUse' && !entry.noticed && entry.decision.changed) {
-      // Only registered when JEV_OPUS_TOOL_NOTICES=1: one native notice per change.
-      entry.noticed = true;
-      return { systemMessage: formatEffortBadge(entry.decision) };
-    }
-    return {};
+    return textHook
+      ? { hookSpecificOutput: { hookEventName: 'MessageDisplay', displayContent: `> **${badge}**\n\n${i.delta}` } }
+      : { systemMessage: badge };
   }
 }
 
-/** Local HTTP hooks avoid spawning a Node process for every streamed text delta. */
+/** Hook metadata stays out of the conversation and never changes tool permissions. */
 export function inlineEffortSettings(hookUrl: string, opts: { toolNotices?: boolean } = {}): Pick<Settings, 'hooks'> {
   const hook = [{ hooks: [{ type: 'http' as const, url: hookUrl, timeout: 1 }] }];
-  return { hooks: opts.toolNotices ? { MessageDisplay: hook, PreToolUse: hook } : { MessageDisplay: hook } };
+  return { hooks: opts.toolNotices !== false ? { MessageDisplay: hook, PreToolUse: hook } : { MessageDisplay: hook } };
 }

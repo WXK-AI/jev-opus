@@ -22,12 +22,30 @@ test('describeToolInput renders the useful part of each tool input', () => {
   assert.equal(describeToolInput('Grep', { pattern: 'TODO', path: 'src' }), '"TODO" in src');
 });
 
-test('testRunner reads the suite from the full command, last runner wins', async () => {
+test('testRunner reads the suite from the full command, preserves suite scope and rejects ambiguous multiple checks', async () => {
   const { testRunner } = await import('../src/claude/describe.ts');
   const heredoc = `cat > package.json <<'EOF'\n${'{"x":1}\n'.repeat(40)}EOF\ncat > dates.test.js <<'EOF'\n...\nEOF\nnpm test 2>&1 | tail -30`;
-  assert.equal(testRunner('Bash', { command: heredoc }), 'npm test', 'found even far past the 160-char summary');
-  assert.equal(testRunner('Bash', { command: "sed -i '' 's/a/b/' dates.js && npm test" }), 'npm test');
-  assert.equal(testRunner('Bash', { command: 'npx tsc --noEmit && pytest -q' }), 'pytest');
+  assert.equal(testRunner('Bash', { command: heredoc }), testRunner('Bash', { command: 'npm test' }), 'found even far past the 160-char summary');
+  assert.equal(testRunner('Bash', { command: "sed -i '' 's/a/b/' dates.js && npm test" }), testRunner('Bash', { command: 'npm test' }));
+  assert.equal(testRunner('Bash', { command: 'npx tsc --noEmit && pytest -q' }), undefined);
   assert.equal(testRunner('Bash', { command: 'ls -la' }), undefined);
   assert.equal(testRunner('Read', { file_path: 'npm test' }), undefined);
+});
+
+test('check identities preserve package, target, case, and check type', async () => {
+  const { testRunner } = await import('../src/claude/describe.ts');
+  const { emptyCore, reduceBatch } = await import('../src/router/state.ts');
+  const call = (command: string, failed: boolean) => ({ tool: 'Bash', summary: describeToolInput('Bash', { command }), runner: testRunner('Bash', { command }), failed, result: failed ? 'FAIL assertion' : 'PASS' });
+  for (const [failed, unrelated] of [
+    ['cd api && npm test', 'cd web && npm test'],
+    ['npm test', 'npm test -- dates.test.js'],
+    ['pytest Tests/A.py', 'pytest Tests/a.py'],
+    ['cargo test', 'cargo check'],
+    ['npm test --workspace api', 'npm test --workspace web'],
+  ]) {
+    const state = reduceBatch(emptyCore(), [call(failed, true)], 'medium').state;
+    const other = reduceBatch(state, [call(unrelated, false)], 'high');
+    assert.equal(other.state.issues.length, 1, `${unrelated} must not resolve ${failed}`);
+    assert.equal(reduceBatch(other.state, [call(failed, false)], 'high').state.issues.length, 0);
+  }
 });
