@@ -64,7 +64,7 @@ async function main() {
     if (argv[0] === 'claude') {
         // Everything after `claude` belongs to Claude Code; routing bounds come from the config/env.
         const trace = createTrace(config.traceDir, logToGateway); // the TUI owns the terminal: log, don't print
-        const jev = new JevClient();
+        const jev = (await jevClient());
         if (!jev.enabled)
             console.error(c.yellow('No Jev key (JEV_API_KEY or OPENROUTER_API_KEY) — routing with local heuristics (run `jev-opus init`).'));
         process.exitCode = await launchClaude(jev, { min: config.minEffort, max: config.maxEffort }, argv.slice(1), trace.write);
@@ -98,7 +98,7 @@ async function main() {
     if (values.version)
         return void console.log(packageVersion());
     if (positionals[0] === 'init')
-        return init();
+        return void (await init());
     if (positionals[0] === 'audit') {
         const report = auditJournal(path.join(CONFIG_DIR, 'journal'), positionals[1]);
         console.log(values.json ? JSON.stringify(report, null, 2) : formatAudit(report));
@@ -106,7 +106,7 @@ async function main() {
     }
     const bounds = { min: effortArg('min', values.min, config.minEffort), max: effortArg('max', values.max, config.maxEffort) };
     const pinned = values.effort ? effortArg('effort', values.effort, 'medium') : null;
-    const jev = values['no-jev'] ? null : new JevClient();
+    const jev = positionals[0] === 'doctor' || values['route-only'] ? (values['no-jev'] ? null : new JevClient()) : await jevClient(values['no-jev']);
     const router = new EffortRouter({ jev, bounds, pinned });
     const terminal = new Terminal(values.verbose ?? false, values.json ?? false);
     // --json: stdout carries only the JSON report; every notice goes to stderr.
@@ -208,7 +208,7 @@ function packageVersion() {
 async function init() {
     if (fs.existsSync(CONFIG_ENV_FILE)) {
         console.log(`${CONFIG_ENV_FILE} already exists — edit it directly.`);
-        return;
+        return '';
     }
     let key = process.env.JEV_API_KEY ?? '';
     if (!key && process.stdin.isTTY) {
@@ -234,6 +234,24 @@ async function init() {
         '',
     ].join('\n'), { mode: 0o600 });
     console.log(`wrote ${CONFIG_ENV_FILE}${key ? '' : ' (add JEV_API_KEY to enable Jev routing)'}\nnext: jev-opus doctor`);
+    return key;
+}
+/**
+ * First run in a terminal with no key and no config file: ask once, right
+ * there. Skipping writes the config file too, so it never asks again.
+ */
+async function jevClient(disabled = false) {
+    if (disabled)
+        return null;
+    const jev = new JevClient();
+    if (jev.enabled || !process.stdin.isTTY || !process.stdout.isTTY || fs.existsSync(CONFIG_ENV_FILE))
+        return jev;
+    console.log(c.bold('First run: jev-opus uses the Jev API to pick Claude\'s effort level.'));
+    console.log(c.dim('Paste a TypeSafe key (https://typesafe.ai) or an OpenRouter key, or press Enter to skip and use local routing.'));
+    const key = await init();
+    if (!key)
+        return jev;
+    return key.startsWith('sk-or-') ? new JevClient({ provider: 'openrouter', apiKey: key }) : new JevClient({ provider: 'typesafe', apiKey: key });
 }
 async function repl(session, router, terminal, run, notice) {
     notice(c.dim('Type a prompt. /pin <effort> · /auto · /bounds <min> <max> · /status · /exit'));

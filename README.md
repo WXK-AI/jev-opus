@@ -41,7 +41,7 @@ Requirements:
 
 ```bash
 npm install -g jev-opus      # or run anything without installing: npx jev-opus …
-jev-opus init       # writes ~/.config/jev-opus/.env and asks for your Jev key
+jev-opus init       # asks for your Jev key and writes ~/.config/jev-opus/.env (the first `jev-opus` run also asks, if you skip this)
 jev-opus doctor     # checks Claude Code, your credential, Jev, and a real Opus 5.5 call
 ```
 
