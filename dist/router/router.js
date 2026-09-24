@@ -1,3 +1,4 @@
+import { isEffort } from '../effort.js';
 import { heuristicStepSignals, heuristicTaskProfile } from './heuristics.js';
 import { applyHysteresis, stepTarget, taskEffort } from './policy.js';
 import { STEP_QUESTIONS, TASK_QUESTIONS } from './questions.js';
@@ -106,6 +107,20 @@ export class EffortRouter {
             kind: 'step', effort: h.effort, previous: ctx.current, changed: h.effort !== ctx.current, reasons,
             source: signals.source, jevLatencyMs, jevError, signals, profile: ctx.profile,
         };
+    }
+    /**
+     * JSON-serializable controller state, so an adapter can persist it with a
+     * decision and restore the common-ancestor state after a rewind or restart.
+     * Adapters must treat the value as opaque.
+     */
+    snapshot() {
+        return { v: 1, hold: this.hold, base: this.base };
+    }
+    restore(s) {
+        if (!s || s.v !== 1)
+            return;
+        this.hold = Number(s.hold) || 0;
+        this.base = isEffort(s.base) ? s.base : this.base;
     }
     /** Profile of the task being worked on, for building step contexts. */
     lastProfileFallback(prompt) {

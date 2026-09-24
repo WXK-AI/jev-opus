@@ -1,4 +1,4 @@
-import type { Effort } from '../effort.ts';
+import { isEffort, type Effort } from '../effort.ts';
 import type { JevAnswer, JevLike } from '../jev/client.ts';
 import { heuristicStepSignals, heuristicTaskProfile } from './heuristics.ts';
 import { applyHysteresis, stepTarget, taskEffort, type Bounds } from './policy.ts';
@@ -35,6 +35,11 @@ export function stepState(ctx: StepContext): string {
   }
   if (ctx.trajectory.length) lines.push(`EARLIER STEPS:\n${ctx.trajectory.slice(-6).join('\n')}`);
   return lines.join('\n');
+}
+
+export interface RouterSnapshot {
+  v: number;
+  [key: string]: unknown;
 }
 
 export class EffortRouter {
@@ -115,6 +120,21 @@ export class EffortRouter {
       kind: 'step', effort: h.effort, previous: ctx.current, changed: h.effort !== ctx.current, reasons,
       source: signals.source, jevLatencyMs, jevError, signals, profile: ctx.profile,
     };
+  }
+
+  /**
+   * JSON-serializable controller state, so an adapter can persist it with a
+   * decision and restore the common-ancestor state after a rewind or restart.
+   * Adapters must treat the value as opaque.
+   */
+  snapshot(): RouterSnapshot {
+    return { v: 1, hold: this.hold, base: this.base };
+  }
+
+  restore(s: RouterSnapshot): void {
+    if (!s || s.v !== 1) return;
+    this.hold = Number(s.hold) || 0;
+    this.base = isEffort(s.base) ? s.base : this.base;
   }
 
   /** Profile of the task being worked on, for building step contexts. */
