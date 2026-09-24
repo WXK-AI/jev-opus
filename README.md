@@ -43,6 +43,46 @@ jev-opus init       # asks for your Jev key and writes ~/.config/jev-opus/.env (
 jev-opus doctor     # checks Claude Code, your credential, Jev, and a real Opus 5.5 call
 ```
 
+## Effort range
+
+jev-opus only moves Claude between the levels you allow. The default is **`low` to `high`**, so `xhigh` and `max` are never used unless you raise the ceiling. The levels, weakest to strongest, are `low`, `medium`, `high`, `xhigh` and `max`.
+
+**`jev-opus claude`:** set the range in `~/.config/jev-opus/.env`:
+
+```
+JEV_OPUS_MIN_EFFORT=low
+JEV_OPUS_MAX_EFFORT=high
+```
+
+For a single session, put the variable before the command:
+
+```bash
+JEV_OPUS_MAX_EFFORT=max jev-opus claude
+```
+
+Arguments after `jev-opus claude` go to Claude Code itself, so this mode takes the range only from these variables.
+
+**`jev-opus "task"` / `jev-opus` (driver mode):** use flags, or commands inside the interactive session:
+
+```bash
+jev-opus --min medium --max xhigh "fix the failing tests"   # set the range
+jev-opus --effort high "…"                                  # pin one level: no adaptive switching
+```
+
+Inside the interactive session:
+- `/bounds low medium` changes the range on the fly.
+- `/pin high` locks one level.
+- `/auto` returns to adaptive switching.
+
+| Range | Good for |
+| --- | --- |
+| `low`…`high` (default) | Everyday coding; keeps costs in check |
+| `low`…`medium` | Cheapest; simple tasks |
+| `medium`…`xhigh` | Harder work; never drops to `low` |
+| `low`…`max` | Everything allowed; `max` is used only for extreme, critical work or after repeated failed fixes |
+
+Within the range, Jev picks the starting level from the task's difficulty, raises it when checks fail, and lowers it once they pass. Running `/effort <level>` yourself in Claude Code overrides Jev until your next prompt.
+
 ## Use it in your normal Claude Code: "Opus 5.5 · Jev" in `/model`
 
 ```bash
@@ -118,7 +158,7 @@ This mode runs Claude Code headless through the Agent SDK. It switches effort wi
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--min` / `--max` | `low` / `high` | effort range Jev may use. Pass `--max max` to allow `xhigh` and `max` (`JEV_OPUS_MIN_EFFORT` / `JEV_OPUS_MAX_EFFORT` for every mode) |
+| `--min` / `--max` | `low` / `high` | effort range Jev may use; see [Effort range](#effort-range) |
 | `--effort <level>` | none | pin one level; no routing |
 | `--no-jev` | off | local heuristics only |
 | `--permission-mode` | `acceptEdits` | anything not auto-allowed is asked for in the terminal; `--yolo` bypasses all prompts |
