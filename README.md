@@ -141,38 +141,44 @@ A plugin can't retune the chat it runs in. Claude Code hooks can't set effort, a
 
 ## How the effort is chosen
 
-**At task start** (`src/router/policy.ts → taskEffort`), from Jev's difficulty score (0 to 4):
+One controller (`src/router/`) serves both modes. It estimates the reasoning the **next** step needs from evidence, not from the last tool's name.
 
-- **Base level:** below 1.25 → `low`; below 2.25 → `medium`; below 3.1 → `high`; above that → `xhigh`.
-- **Task-type limits:** chat and factual questions cap at `medium`; writing and small code changes cap at `high`.
-- **Floors:** debugging, architecture, math and feature work start at `medium` or above, unless the task is genuinely trivial.
-- **High stakes** raise the level by one, to at least `high`.
-- **`max`** only for extreme, critical work.
+**At task start,** Jev classifies the task: its type, difficulty (0 to 4) and stakes. That sets the base level:
+- difficulty below 1.25 → `low`, below 2.25 → `medium`, below 3.1 → `high`, above that `xhigh`
+- chat and factual questions cap at `medium`
+- non-trivial debugging and design work starts at least at `medium`
+- high stakes add a level
 
-**After each tool batch** (`stepTarget`):
+**During the task,** a reducer tracks evidence across tool calls:
+- **Unresolved failures** are tracked by a stable fingerprint. A later pass of the same command or test clears them, even when rerun as `npm test 2>&1 | tail`. A successful read in between does **not**.
+- **Recovery history:** a repeated failure goes one level above the highest effort already tried on it, up to your ceiling, so `max` is reachable when you allow it.
+- **Environment blockers** (network, registry, permissions, credentials, missing commands) hold the current effort instead of raising it.
+- **Lowering effort** needs positive evidence: no unresolved issues and a clearly routine next step. Without that, it holds.
+- **Anti-flapping:** after a raise, the level holds for a step. Bounds are enforced **last**, so tightening them takes effect at once.
 
-| Phase | Adjustment from the task's level |
-| --- | --- |
-| exploring | −1 |
-| implementing | none |
-| diagnosing | +1 |
-| verifying | −1 |
-| finishing | −1, capped at `medium` |
+**Selective Jev.** Jev is asked at task start, and on a step only when its answer could change the decision: a failure, a proposed downgrade, or unclear local evidence. Other steps are decided locally (`local` in the log). Jev answers are schema-validated: a missing or malformed field keeps the local estimate and never counts as a judgment. Each decision has one 2.5 s deadline (`JEV_DEADLINE_MS`), and a circuit breaker skips Jev during outages.
 
-- **A hard next step** goes to at least `high`.
-- **Failed tool calls** add one level.
-- **Stuck** (repeated failures, or Jev judges the agent stuck) jumps up at least two levels.
-- **Floor:** a step never drops more than two levels below the task's level.
+This is a policy, not a proven optimum. Whether it beats fixed `medium` or `high` on cost at equal quality has to be measured on real tasks; see `docs/architecture-review.md`.
 
-**Anti-flapping:** raises apply immediately. After a raise, the level holds for one more step, then steps down one level at a time.
+## Transcript integrity (gateway)
 
-**If Jev is unreachable,** routing falls back to deterministic heuristics (`src/router/heuristics.ts`). A Jev outage never stops a run.
+Inserted effort statements become part of the history the model has seen, so they must be replayed exactly on every later request:
+- **Journal:** every decision is written to an append-only journal in `~/.config/jev-opus/journal/` (owner-only files) **before** the request is forwarded.
+- **Eviction and restart:** after a cache eviction or a gateway restart, the conversation is rebuilt from the journal. Verified live: after a restart, a resumed conversation read 32,181 tokens from cache and wrote 75.
+- **Retries:** identical concurrent requests share one prepared decision.
+- **Edited history:** a request whose earlier content changed is re-routed from the common ancestor.
+- **Privacy:** the journal holds hashes, effort levels and usage numbers, never prompts, tool output or credentials. Final usage and stop reason are recorded for each decision.
+
+**Accounting.** Driver-mode task costs are differences between Claude Code's cumulative session totals, subagents included. Per-call output tokens in driver mode are the SDK's streamed values and can undercount. Use task totals, or the gateway journal, for exact numbers.
 
 ## Credentials and isolation
 
 The Claude Code child process never inherits a parent session's `ANTHROPIC_*` / `CLAUDE_*` variables. That matters when jev-opus is launched from inside Claude Code: without this, it would reuse the parent's token and its pinned `CLAUDE_CODE_EFFORT_LEVEL`. The child gets only:
-- `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` from the jev-opus config, or
+- a `JEV_OPUS_ANTHROPIC_API_KEY` / `JEV_OPUS_CLAUDE_OAUTH_TOKEN` variable, or
+- an `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` written in a jev-opus `.env` file, or
 - your `claude` login.
+
+A plain `ANTHROPIC_API_KEY` inherited from the launching environment is **not** used unless you set `JEV_OPUS_INHERIT_CREDENTIALS=1`. `jev-opus doctor` shows which source was picked.
 
 The child also skips `~/.claude/settings.json` by default, so a proxy configured there can't redirect it, and your claude.ai connectors aren't loaded.
 
