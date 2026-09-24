@@ -40,3 +40,17 @@ test('step heuristics derive the phase from the tool batch', () => {
 test('step heuristics flag stuck after repeated failures', () => {
   assert.ok(heuristicStepSignals(ctx([call('Bash', 'npm test', true)], 3)).stuck >= 0.7);
 });
+
+test('step heuristics mark ambiguous batches as low confidence', () => {
+  assert.ok(heuristicStepSignals(ctx([])).phaseConfidence < 0.5, 'empty batch: no evidence the work is finishing');
+  const mixed = heuristicStepSignals(ctx([call('Edit', 'a.ts'), call('Bash', 'npm test')]));
+  assert.ok(mixed.phaseConfidence < 0.5, 'write + verify in one batch is ambiguous');
+});
+
+test('step heuristics ignore environment-only failures when asked', () => {
+  const down = ctx([call('Bash', 'npm install', true)], 4);
+  assert.equal(heuristicStepSignals(down).phase, 'diagnosing');
+  const env = heuristicStepSignals(down, { ignoreFailures: true });
+  assert.notEqual(env.phase, 'diagnosing');
+  assert.ok(env.stuck < 0.7, 'environment blockers are not being stuck');
+});

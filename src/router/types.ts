@@ -1,5 +1,18 @@
 import type { Effort } from '../effort.ts';
+import type { JevResult } from '../jev/client.ts';
 import type { Phase, TaskType } from './questions.ts';
+
+/**
+ * Jev result plus the fields the validating client adds. On older clients
+ * `signals` is absent and every answer is present (treat those as valid);
+ * the validating client omits missing/invalid answers instead.
+ */
+export type JevResponse = JevResult & {
+  /** per-question evidence quality; undefined means an older client */
+  signals?: Record<string, 'valid' | 'missing' | 'invalid'>;
+  /** circuit breaker open → Jev unavailable for this call */
+  circuitOpen?: boolean;
+};
 
 export interface TaskProfile {
   taskType: TaskType;
@@ -49,9 +62,13 @@ export interface EffortDecision {
   previous: Effort | null;
   changed: boolean;
   reasons: string[];
-  source: 'jev' | 'heuristic' | 'pinned';
+  /** 'local' = the policy gate decided no Jev call could change the outcome */
+  source: 'jev' | 'heuristic' | 'pinned' | 'local';
   jevLatencyMs: number;
   jevError?: string;
   profile?: TaskProfile;
   signals?: StepSignals;
+  policyVersion?: string;
+  /** versions of the Jev question sets this decision could draw on */
+  questionVersions?: { task?: string; step?: string };
 }

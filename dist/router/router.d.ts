@@ -14,6 +14,7 @@ export declare class EffortRouter {
     pinned: Effort | null;
     private hold;
     private base;
+    private core;
     constructor(opts: {
         jev: JevLike | null;
         bounds: Bounds;
@@ -31,5 +32,7 @@ export declare class EffortRouter {
     restore(s: RouterSnapshot): void;
     /** Profile of the task being worked on, for building step contexts. */
     lastProfileFallback(prompt: string): TaskProfile;
+    /** The reducer's open issues, as extra state lines for the evaluator. */
+    private stepAskState;
     private pinnedDecision;
 }

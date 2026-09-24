@@ -110,10 +110,12 @@ function fakeClaude(steps: Step[], opts: FakeClaudeOpts = {}) {
 }
 
 test('Jev changes effort mid-prompt: failing test → high, hold, finishing → low', async () => {
+  // Selective Jev: while the failing test is unresolved the Edit step is decided
+  // locally, so the script only needs entries for the task, the failure, and
+  // the passing run (a proposed downgrade, which Jev confirms as finishing).
   const jev = scriptedJev([
     { task_type: { choice: 'debugging', confidence: 0.9 }, difficulty: { score: 1.8 }, stakes: { noul: 0.2 } },
     { phase: { choice: 'diagnosing', confidence: 0.9 }, step_difficulty: { score: 3.4 }, stuck: { noul: 0.1 } },
-    { phase: { choice: 'verifying', confidence: 0.8 }, step_difficulty: { score: 1.0 }, stuck: { noul: 0.1 } },
     { phase: { choice: 'finishing', confidence: 0.9 }, step_difficulty: { score: 0.5 }, stuck: { noul: 0.05 } },
   ]);
   const claude = fakeClaude([

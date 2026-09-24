@@ -1,4 +1,10 @@
 import { clampEffort, fromRank, rank } from '../effort.js';
+/** Version of this policy, recorded on every decision for provenance. */
+export const POLICY_VERSION = 'policy.v2';
+/** Misordered bounds are a configuration error: swap them rather than crash. */
+export function normalizeBounds(b) {
+    return rank(b.min) <= rank(b.max) ? b : { min: b.max, max: b.min };
+}
 const LOW = 0, MEDIUM = 1, HIGH = 2, XHIGH = 3, MAX = 4;
 export function difficultyRank(d) {
     if (d < 1.25)
@@ -42,14 +48,16 @@ export function taskEffort(p, bounds) {
     }
     else
         r = Math.min(r, XHIGH);
-    const effort = clampEffort(fromRank(r), bounds.min, bounds.max);
+    const nb = normalizeBounds(bounds);
+    const effort = clampEffort(fromRank(r), nb.min, nb.max);
     if (effort !== fromRank(r))
         reasons.push(`bounded to ${effort}`);
     return { effort, reasons };
 }
-export function stepTarget(base, s, consecutiveFailures, bounds) {
+export function stepTarget(base, s, ev, current) {
     const reasons = [];
     const b = rank(base);
+    const c = rank(current);
     let r = b;
     const trustPhase = s.source === 'heuristic' || s.phaseConfidence >= 0.3;
     if (trustPhase) {
@@ -90,28 +98,54 @@ export function stepTarget(base, s, consecutiveFailures, bounds) {
         r = Math.max(LOW, r - 1);
         reasons.push(`trivial step ${s.stepDifficulty.toFixed(1)} → -1`);
     }
-    if (consecutiveFailures >= 1 && s.phase !== 'diagnosing') {
-        r += 1;
-        reasons.push(`${consecutiveFailures} failed call(s) → +1`);
+    // Failures escalate relative to the effort already tried on them, never the
+    // initial estimate: a repeated unresolved failure goes one level above the
+    // highest effort that has already failed on that issue.
+    if (ev.triedOnFailure.length) {
+        const tried = Math.max(c, ...ev.triedOnFailure.map(rank));
+        const floor = tried + 1;
+        if (r < floor) {
+            r = floor;
+            reasons.push(ev.repeated
+                ? `same failure already lost at ${fromRank(tried)} → ${fromRank(floor)}`
+                : `failed step → ${fromRank(floor)}`);
+        }
     }
-    const stuck = s.stuck >= 0.7 || consecutiveFailures >= 3;
-    let cap = XHIGH;
-    if (stuck) {
+    const stuck = s.stuck >= 0.7 || ev.maxAttempts >= 3;
+    if (stuck && ev.unresolved > 0) {
         // Raising works best as a large jump: go at least two levels up, at least high.
         r = Math.max(r, b + 2, HIGH);
-        reasons.push(`stuck (${s.stuck.toFixed(2)}, ${consecutiveFailures} fails) → escalate`);
-        if (consecutiveFailures >= 4 || s.stuck >= 0.9)
-            cap = MAX;
+        reasons.push(`stuck (${s.stuck.toFixed(2)}, ${ev.maxAttempts} attempts) → escalate`);
     }
-    if (b === MAX)
-        cap = MAX;
+    // Environment blockers hold the current effort; they never drive escalation.
+    if (ev.environmentOnly) {
+        if (r !== c)
+            reasons.push('environment blocker → hold');
+        r = c;
+    }
+    // De-escalation needs positive evidence: no unresolved reasoning issues and
+    // a routine next step. A successful read or a finishing phase alone never
+    // lowers effort while an issue remains open.
+    if (r < c) {
+        if (ev.unresolved > 0) {
+            r = c;
+            reasons.push(`${ev.unresolved} unresolved issue(s) → hold ${current}`);
+        }
+        else if (s.phase === 'diagnosing' || !ev.routineOk) {
+            r = c;
+            reasons.push('no routine evidence → hold');
+        }
+    }
     // Never drift more than two levels under the task's own level.
     r = Math.max(r, b - 2, LOW);
+    let cap = XHIGH;
+    const triedMax = ev.triedOnFailure.length ? Math.max(...ev.triedOnFailure.map(rank)) : -1;
+    if (triedMax >= XHIGH || (ev.unresolved > 0 && s.stuck >= 0.9))
+        cap = MAX;
+    if (b === MAX || c === MAX)
+        cap = MAX;
     r = Math.min(r, cap);
-    const effort = clampEffort(fromRank(r), bounds.min, bounds.max);
-    if (effort !== fromRank(r))
-        reasons.push(`bounded to ${effort}`);
-    return { effort, reasons };
+    return { effort: fromRank(r), reasons };
 }
 /**
  * Anti-flapping: raises apply at once; after a raise the level is held for

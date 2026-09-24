@@ -48,27 +48,35 @@ const READ_ONLY_TOOLS = /^(Read|Glob|Grep|LS|WebFetch|WebSearch|TodoWrite|Notebo
 const WRITE_TOOLS = /^(Write|Edit|MultiEdit|NotebookEdit)$/;
 const VERIFY_CMD = /\b(test|jest|vitest|pytest|mocha|cargo (test|check|build)|go (test|build|vet)|tsc|lint|eslint|build|typecheck|make( |$)|npm run|pnpm|yarn)\b/i;
 
-export function heuristicStepSignals(ctx: StepContext): StepSignals {
+export function heuristicStepSignals(ctx: StepContext, opts?: { ignoreFailures?: boolean }): StepSignals {
   const calls = ctx.lastBatch;
-  const failed = calls.filter((c) => c.failed).length;
+  // ignoreFailures: every failure in the batch was an environment blocker, so
+  // it must not steer the phase estimate toward diagnosing.
+  const failed = opts?.ignoreFailures ? 0 : calls.filter((c) => c.failed).length;
+  const consecutiveFailures = opts?.ignoreFailures ? 0 : ctx.consecutiveFailures;
+  const writes = calls.some((c) => WRITE_TOOLS.test(c.tool));
+  const verify = calls.some((c) => c.tool === 'Bash' && VERIFY_CMD.test(c.summary));
+
+  // Confidence below 0.5 marks genuine ambiguity and lets the router consult Jev.
   let phase: Phase = 'exploring';
-  if (calls.length === 0) phase = 'finishing';
-  else if (failed > 0) phase = 'diagnosing';
-  else if (calls.some((c) => WRITE_TOOLS.test(c.tool))) phase = 'implementing';
-  else if (calls.some((c) => c.tool === 'Bash' && VERIFY_CMD.test(c.summary))) phase = 'verifying';
-  else if (calls.every((c) => READ_ONLY_TOOLS.test(c.tool))) phase = 'exploring';
+  let phaseConfidence = 0.5;
+  if (calls.length === 0) { phase = 'finishing'; phaseConfidence = 0.4; }
+  else if (failed > 0) { phase = 'diagnosing'; phaseConfidence = 0.6; }
+  else if (writes && verify) { phase = 'implementing'; phaseConfidence = 0.4; }
+  else if (writes) { phase = 'implementing'; phaseConfidence = 0.6; }
+  else if (verify) { phase = 'verifying'; phaseConfidence = 0.6; }
 
   const stepDifficulty =
-    phase === 'diagnosing' ? Math.min(4, 2.2 + 0.5 * ctx.consecutiveFailures)
+    phase === 'diagnosing' ? Math.min(4, 2.2 + 0.5 * consecutiveFailures)
       : phase === 'implementing' ? Math.max(1.5, ctx.profile.difficulty)
         : phase === 'verifying' ? 1.0
           : phase === 'finishing' ? 0.8
             : 1.0;
   return {
     phase,
-    phaseConfidence: 0.5,
+    phaseConfidence,
     stepDifficulty,
-    stuck: ctx.consecutiveFailures >= 3 ? 0.8 : ctx.consecutiveFailures === 2 ? 0.5 : 0.1,
+    stuck: consecutiveFailures >= 3 ? 0.8 : consecutiveFailures === 2 ? 0.5 : 0.1,
     source: 'heuristic',
   };
 }
