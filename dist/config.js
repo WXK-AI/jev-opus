@@ -29,7 +29,8 @@ for (const file of [path.join(PROJECT_ROOT, '.env'), CONFIG_ENV_FILE]) {
     for (const [k, v] of Object.entries(parsed)) {
         if (v === undefined)
             continue;
-        if (!envFileVars.has(k))
+        // An empty line (`ANTHROPIC_API_KEY=`) doesn't count as configured, so it can't shadow a later file's value.
+        if (v !== '' && !envFileVars.has(k))
             envFileVars.set(k, { value: v, file });
         if (process.env[k] === undefined)
             process.env[k] = v;
@@ -95,7 +96,7 @@ export const config = {
         openrouterModel: process.env.JEV_OPENROUTER_MODEL || 'typesafe/jev-1.13',
         // One overall deadline per decision — Jev sits in the request path, so the
         // budget is small; retries (opt-in) must still finish inside it.
-        deadlineMs: envInt('JEV_DEADLINE_MS', 2_500), // live Jev p99 was ~1.6s
+        deadlineMs: envInt('JEV_DEADLINE_MS', 2_500), // slowest live Jev answer observed so far: ~1.6s
         retries: envInt('JEV_RETRIES', 0),
         breakerThreshold: envInt('JEV_BREAKER_THRESHOLD', 3, 1),
         breakerCooldownMs: envInt('JEV_BREAKER_COOLDOWN_MS', 30_000),
