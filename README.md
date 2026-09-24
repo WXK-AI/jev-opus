@@ -51,11 +51,31 @@ jev-opus doctor     # checks Claude Code, your credential, Jev, and a real Opus 
 jev-opus claude                 # any `claude` arguments work: jev-opus claude -c, jev-opus claude -p "…"
 ```
 
-This opens the regular interactive Claude Code, the same interface, tools and approvals. It adds a model entry, **Opus 5.5 · Jev**, and selects it for you. While that model is selected, Jev re-picks the effort before every API call. Pick any other model in `/model` and requests pass through untouched. The status line shows Jev's current choice:
+This opens the regular interactive Claude Code, the same interface, tools and approvals. It adds a model entry, **Opus 5.5 · Jev**, and selects it for you. While that model is selected, Jev re-picks the effort before every API call. Pick any other model in `/model` and requests pass through untouched. Each assistant text message gets an **inline effort badge**, so you can see the selected effort beside the work it governs:
+
+```text
+◆ Jev · MEDIUM → LOW · exploring
+
+I’ll read the parser and its tests.
+
+◆ Jev · LOW → HIGH · diagnosing
+
+The failure comes from how leap years are handled.
+
+◆ Jev · HIGH · verifying
+
+I’ll check the fix against the remaining cases.
+```
+
+The transition arrow appears on the first badge for a decision; later messages repeat the current level. A response containing only tool calls gets one inline notice before its tools run. Manual `/effort` changes are labelled `manual override`; local decisions are labelled `local routing`. The status line also shows Jev's latest choice:
 
 ```
 ◆ Jev low → HIGH · diagnosing
 ```
+
+The badges use Claude Code's [MessageDisplay hook](https://code.claude.com/docs/en/hooks#messagedisplay). They change the live display only: they add no model tokens, do not rewrite the model conversation, and are not saved into exported or resumed historical messages. Hook requests stay on the local gateway and make no additional Jev calls. The badge reports the gateway's selected effort, not independent confirmation of the provider's effective effort.
+
+`jev-opus claude` enables badges automatically and merges the hooks with any `--settings` JSON or file you supply. It preserves your custom status line. Set `JEV_OPUS_NO_INLINE_EFFORT=1` to disable badges, or `JEV_OPUS_NO_STATUSLINE=1` to omit the Jev status line. Other `MessageDisplay` hooks run in parallel and can compete to replace displayed text; use one display formatter at a time. Claude Code's safe mode or disabled hooks also disable inline badges.
 
 **How it works:** `jev-opus claude` starts a small local gateway and points Claude Code at it (`ANTHROPIC_BASE_URL`, an officially supported setup that keeps your claude.ai login). For each request on the Jev model, the gateway asks Jev and inserts a **per-message effort statement** at the turn it governs. It replays every earlier insertion byte-identically on later requests, so the cached prefix and preserved-thinking blocks stay valid. Verified live: effort went medium → low → high → high → low inside one prompt, while cache reads grew on every call (24.5k → 29.9k → 30.0k → 31.4k → 32.3k).
 
@@ -70,6 +90,8 @@ Start a long-running gateway, then point the surface at it:
 ```bash
 jev-opus gateway                # http://127.0.0.1:47821, prints the env to use; decisions logged to ~/.config/jev-opus/gateway.log
 ```
+
+The standalone gateway also prints the hook settings for inline badges. Merge those into the client's Claude Code settings while that gateway is running. Restarting the gateway generates a new hook URL; `jev-opus claude` wires this up automatically on each launch.
 
 | Surface | How | Works with a claude.ai subscription? |
 | --- | --- | --- |

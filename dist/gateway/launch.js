@@ -6,6 +6,8 @@ import { childEnv } from '../claude/env.js';
 import { CONFIG_DIR, config } from '../config.js';
 import { formatDecision } from '../ui.js';
 import { JevGateway, readStatus } from './server.js';
+import { inlineEffortSettings } from './display.js';
+import { withGatewaySettings } from './settings.js';
 export const JEV_MODEL_ID = 'jev/claude-opus-5-5';
 export const STATUS_DIR = path.join(CONFIG_DIR, 'status');
 export const GATEWAY_LOG = path.join(CONFIG_DIR, 'gateway.log');
@@ -54,24 +56,28 @@ export async function launchClaude(jev, bounds, claudeArgs, trace) {
     const baseUrl = await gateway.listen();
     const { env } = childEnv(process.env, { connectors: true });
     Object.assign(env, gatewayClientEnv(baseUrl));
-    const args = [...claudeArgs];
-    if (!args.some((a) => a === '--model' || a.startsWith('--model=')))
-        args.unshift('--model', JEV_MODEL_ID);
-    if (!args.some((a) => a === '--settings' || a.startsWith('--settings=')) && process.env.JEV_OPUS_NO_STATUSLINE !== '1') {
+    try {
         const cli = fileURLToPath(new URL('../cli.' + (import.meta.url.endsWith('.ts') ? 'ts' : 'js'), import.meta.url));
-        const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(cli)} statusline`;
-        args.unshift('--settings', JSON.stringify({ statusLine: { type: 'command', command } }));
-    }
-    const child = spawn(config.claudePath ?? 'claude', args, { stdio: 'inherit', env });
-    const code = await new Promise((resolve) => {
-        child.on('exit', (c, sig) => resolve(c ?? (sig ? 1 : 0)));
-        child.on('error', (err) => {
-            console.error(`could not start claude: ${err.message}`);
-            resolve(127);
+        const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
+        const command = `${quote(process.execPath)} ${quote(cli)} statusline`;
+        const args = withGatewaySettings(claudeArgs, {
+            ...(process.env.JEV_OPUS_NO_INLINE_EFFORT === '1' ? {} : inlineEffortSettings(baseUrl + gateway.displayHookPath)),
+            ...(process.env.JEV_OPUS_NO_STATUSLINE === '1' ? {} : { statusLine: { type: 'command', command } }),
         });
-    });
-    await gateway.close();
-    return code;
+        if (!args.some((a) => a === '--model' || a.startsWith('--model=')))
+            args.unshift('--model', JEV_MODEL_ID);
+        const child = spawn(config.claudePath ?? 'claude', args, { stdio: 'inherit', env });
+        return await new Promise((resolve) => {
+            child.on('exit', (c, sig) => resolve(c ?? (sig ? 1 : 0)));
+            child.on('error', (err) => {
+                console.error(`could not start claude: ${err.message}`);
+                resolve(127);
+            });
+        });
+    }
+    finally {
+        await gateway.close();
+    }
 }
 /** Claude Code statusLine command: shows the effort Jev picked for this session. */
 export async function statusline() {

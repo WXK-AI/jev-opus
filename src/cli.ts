@@ -11,6 +11,7 @@ import { EFFORT_LEVELS, isEffort, type Effort } from './effort.ts';
 import { JevClient } from './jev/client.ts';
 import { EffortRouter } from './router/router.ts';
 import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, statusline } from './gateway/launch.ts';
+import { inlineEffortSettings } from './gateway/display.ts';
 import { createTrace } from './trace.ts';
 import { c, fmtEffort, formatDecision, formatReport, Terminal } from './ui.ts';
 
@@ -180,6 +181,8 @@ async function gateway(jev: JevClient | null, bounds: { min: Effort; max: Effort
   console.log(c.dim('Point Claude Code at it (CLI shell, VS Code "claudeCode.environmentVariables", Agent SDK env):'));
   for (const [k, v] of Object.entries(env)) console.log(c.dim(`  ${k}=${v}`));
   console.log(c.dim(`then pick "Opus 5.5 · Jev" in /model (or --model ${JEV_MODEL_ID}). Ctrl-C to stop.`));
+  console.log(c.dim('For inline effort badges, merge these session hooks into your Claude Code settings (valid while this gateway runs):'));
+  console.log(JSON.stringify(inlineEffortSettings(url + gw.displayHookPath), null, 2));
   await new Promise<void>((resolve) => process.once('SIGINT', resolve));
   await gw.close();
 }

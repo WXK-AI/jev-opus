@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -9,6 +10,7 @@ import type { Bounds } from '../router/policy.ts';
 import { EffortRouter } from '../router/router.ts';
 import type { EffortDecision, TaskProfile } from '../router/types.ts';
 import { isEffort } from '../effort.ts';
+import { EffortDisplay } from './display.ts';
 import {
   addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt,
   lastToolRound, prefixHashes, stripJevModel, userText, type Insertion, type Message,
@@ -56,6 +58,9 @@ const HOP_BY_HOP = new Set(['host', 'connection', 'content-length', 'accept-enco
 const DROP_RESPONSE = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive']);
 
 export class JevGateway {
+  /** Ephemeral local endpoint; hook payloads are never forwarded upstream. */
+  readonly displayHookPath = `/_jev/hooks/${randomUUID()}`;
+  private readonly display = new EffortDisplay();
   private readonly opts: GatewayOptions;
   private readonly upstream: string;
   private readonly threads = new Map<string, Thread>();
@@ -84,6 +89,24 @@ export class JevGateway {
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if ((req.url ?? '').startsWith('/_jev/')) {
+      if (req.method !== 'POST' || req.url !== this.displayHookPath) {
+        res.writeHead(404).end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const c of req) {
+        size += (c as Buffer).length;
+        if (size > 1_048_576) { res.writeHead(413).end(); return; }
+        chunks.push(c as Buffer);
+      }
+      let output = {};
+      try { output = this.display.handle(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { /* invalid hook: no UI change */ }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(output));
+      return;
+    }
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
     let body: Buffer | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
@@ -117,6 +140,9 @@ export class JevGateway {
           headers['anthropic-beta'] = addBeta(headers['anthropic-beta']);
         }
         body = Buffer.from(JSON.stringify(parsed));
+      } else if (parsed && pathname === '/v1/messages' && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+        // Model switches must not label the next model's responses with a stale Jev decision.
+        this.display.clear(headers['x-claude-code-session-id'] ?? 'no-session', headers['x-claude-code-agent-id'] ?? 'main');
       }
     }
 
@@ -181,6 +207,12 @@ export class JevGateway {
     const current: Effort = t.effort ?? client?.effort ?? (isEffort(topLevel) ? topLevel : 'medium');
     if (t.manual) {
       t.effort = client?.effort ?? current;
+      const manual: EffortDecision = {
+        kind: prompting ? 'task' : 'step', effort: t.effort, previous: current,
+        changed: t.effort !== current, reasons: ['manual override'], source: 'pinned', jevLatencyMs: 0,
+      };
+      this.display.record(session, agent, manual);
+      this.writeStatus(session, agent, manual);
       return applyInsertions(messages, t.insertions);
     }
 
@@ -212,6 +244,7 @@ export class JevGateway {
     }
     t.effort = decision.effort;
     const final = { ...decision, previous: current, changed: decision.effort !== current };
+    this.display.record(session, agent, final);
     this.opts.onDecision?.(session, final);
     this.opts.trace?.({ event: 'gateway_decision', session, agent, index: lastUser, ...final });
     this.writeStatus(session, agent, final);

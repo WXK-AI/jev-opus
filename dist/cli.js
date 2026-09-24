@@ -10,6 +10,7 @@ import { EFFORT_LEVELS, isEffort } from './effort.js';
 import { JevClient } from './jev/client.js';
 import { EffortRouter } from './router/router.js';
 import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, statusline } from './gateway/launch.js';
+import { inlineEffortSettings } from './gateway/display.js';
 import { createTrace } from './trace.js';
 import { c, fmtEffort, formatDecision, formatReport, Terminal } from './ui.js';
 const HELP = `jev-opus — Claude Opus 5.5 (via Claude Code) with effort steered turn-by-turn by Jev
@@ -180,6 +181,8 @@ async function gateway(jev, bounds, port) {
     for (const [k, v] of Object.entries(env))
         console.log(c.dim(`  ${k}=${v}`));
     console.log(c.dim(`then pick "Opus 5.5 · Jev" in /model (or --model ${JEV_MODEL_ID}). Ctrl-C to stop.`));
+    console.log(c.dim('For inline effort badges, merge these session hooks into your Claude Code settings (valid while this gateway runs):'));
+    console.log(JSON.stringify(inlineEffortSettings(url + gw.displayHookPath), null, 2));
     await new Promise((resolve) => process.once('SIGINT', resolve));
     await gw.close();
 }

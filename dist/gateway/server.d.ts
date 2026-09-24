@@ -22,6 +22,9 @@ export interface GatewayOptions {
     maxThreads?: number;
 }
 export declare class JevGateway {
+    /** Ephemeral local endpoint; hook payloads are never forwarded upstream. */
+    readonly displayHookPath: string;
+    private readonly display;
     private readonly opts;
     private readonly upstream;
     private readonly threads;

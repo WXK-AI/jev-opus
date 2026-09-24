@@ -1,13 +1,18 @@
 import fs from 'node:fs';
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { EffortRouter } from '../router/router.js';
 import { isEffort } from '../effort.js';
+import { EffortDisplay } from './display.js';
 import { addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt, lastToolRound, prefixHashes, stripJevModel, userText, } from './transcript.js';
 const HOP_BY_HOP = new Set(['host', 'connection', 'content-length', 'accept-encoding', 'transfer-encoding', 'keep-alive', 'proxy-connection', 'upgrade']);
 const DROP_RESPONSE = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive']);
 export class JevGateway {
+    /** Ephemeral local endpoint; hook payloads are never forwarded upstream. */
+    displayHookPath = `/_jev/hooks/${randomUUID()}`;
+    display = new EffortDisplay();
     opts;
     upstream;
     threads = new Map();
@@ -33,6 +38,30 @@ export class JevGateway {
         await new Promise((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
     }
     async handle(req, res) {
+        if ((req.url ?? '').startsWith('/_jev/')) {
+            if (req.method !== 'POST' || req.url !== this.displayHookPath) {
+                res.writeHead(404).end();
+                return;
+            }
+            const chunks = [];
+            let size = 0;
+            for await (const c of req) {
+                size += c.length;
+                if (size > 1_048_576) {
+                    res.writeHead(413).end();
+                    return;
+                }
+                chunks.push(c);
+            }
+            let output = {};
+            try {
+                output = this.display.handle(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+            }
+            catch { /* invalid hook: no UI change */ }
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(output));
+            return;
+        }
         const chunks = [];
         for await (const c of req)
             chunks.push(c);
@@ -68,6 +97,10 @@ export class JevGateway {
                     headers['anthropic-beta'] = addBeta(headers['anthropic-beta']);
                 }
                 body = Buffer.from(JSON.stringify(parsed));
+            }
+            else if (parsed && pathname === '/v1/messages' && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+                // Model switches must not label the next model's responses with a stale Jev decision.
+                this.display.clear(headers['x-claude-code-session-id'] ?? 'no-session', headers['x-claude-code-agent-id'] ?? 'main');
             }
         }
         const controller = new AbortController();
@@ -131,6 +164,12 @@ export class JevGateway {
         const current = t.effort ?? client?.effort ?? (isEffort(topLevel) ? topLevel : 'medium');
         if (t.manual) {
             t.effort = client?.effort ?? current;
+            const manual = {
+                kind: prompting ? 'task' : 'step', effort: t.effort, previous: current,
+                changed: t.effort !== current, reasons: ['manual override'], source: 'pinned', jevLatencyMs: 0,
+            };
+            this.display.record(session, agent, manual);
+            this.writeStatus(session, agent, manual);
             return applyInsertions(messages, t.insertions);
         }
         let decision;
@@ -162,6 +201,7 @@ export class JevGateway {
         }
         t.effort = decision.effort;
         const final = { ...decision, previous: current, changed: decision.effort !== current };
+        this.display.record(session, agent, final);
         this.opts.onDecision?.(session, final);
         this.opts.trace?.({ event: 'gateway_decision', session, agent, index: lastUser, ...final });
         this.writeStatus(session, agent, final);

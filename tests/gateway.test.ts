@@ -200,6 +200,46 @@ test('gateway: a changed client effort (the user ran /effort) pauses routing unt
     assert.equal(jev.calls, 1, 'no step routing after the user set effort by hand');
     const sent = up.seen.at(-1)!.body!.messages as Message[];
     assert.equal(effortInForce(sent, undefined), 'high', "the user's level stays in force");
+    const notice = await fetch(base + gw.displayHookPath, { method: 'POST', body: JSON.stringify({ hook_event_name: 'PreToolUse', session_id: 'sess-1' }) });
+    assert.match((await notice.json() as { systemMessage: string }).systemMessage, /HIGH · manual override/);
+  } finally {
+    await gw.close();
+    up.close();
+  }
+});
+
+test('gateway: inline display hooks stay local, preserve the model transcript, and stop on model switch', async () => {
+  const up = await fakeUpstream();
+  const jev = scriptedJev([
+    { task_type: { choice: 'code_small', confidence: .9 }, difficulty: { score: .2 }, stakes: { noul: .1 } },
+    { phase: { choice: 'diagnosing', confidence: .9 }, step_difficulty: { score: 3.5 }, stuck: { noul: .1 } },
+  ]);
+  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
+  const base = await gw.listen();
+  const hook = async (input: unknown) => (await fetch(base + gw.displayHookPath, { method: 'POST', body: JSON.stringify(input) })).json();
+  try {
+    const messages = [u('rename x to y')];
+    const request = { model: 'jev/claude-opus-5-5', tools, messages };
+    await post(base, request);
+    const originalRequest = structuredClone(up.seen[0]!.body);
+    const input = { hook_event_name: 'MessageDisplay', session_id: 'sess-1', index: 0, delta: 'Reading the file.\n' };
+    const badge = await hook(input) as { hookSpecificOutput: { displayContent: string } };
+    assert.match(badge.hookSpecificOutput.displayContent, /MEDIUM → LOW/);
+    assert.ok(badge.hookSpecificOutput.displayContent.endsWith(input.delta));
+    assert.equal(up.seen.length, 1, 'hook content is never sent to the upstream API');
+    await post(base, request);
+    assert.deepEqual(up.seen[1]!.body, originalRequest, 'displaying a badge never changes retry/history bytes');
+    assert.equal(jev.calls, 1, 'displaying badges makes no extra evaluator calls');
+
+    await post(base, { ...request, messages: [...messages, a('t1', 'npm test'), r('t1', 'FAILED', true)] });
+    assert.deepEqual(await hook({ hook_event_name: 'PreToolUse', session_id: 'sess-1' }), { systemMessage: '◆ Jev · LOW → HIGH · diagnosing' });
+    await post(base, { ...request, model: 'claude-opus-5-5' });
+    assert.deepEqual(await hook(input), {});
+    const before = up.seen.length;
+    assert.deepEqual(await hook(null), {});
+    const unknown = await fetch(base + '/_jev/hooks/wrong', { method: 'POST', body: '{}' });
+    assert.equal(unknown.status, 404);
+    assert.equal(up.seen.length, before, 'unknown hook paths are not proxied either');
   } finally {
     await gw.close();
     up.close();
