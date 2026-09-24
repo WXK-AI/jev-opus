@@ -244,21 +244,34 @@ export class JevGateway {
     res: http.ServerResponse,
     controller: AbortController,
   ): void {
-    const chunks: Buffer[] = [];
-    let size = 0;
+    // message_start (input/cache usage) arrives first and message_delta (final
+    // output usage, stop_reason) arrives last, so keep a bounded head AND a
+    // rolling tail: a long response, like a large file write, can't push the
+    // final usage out of the copy.
+    const head: Buffer[] = [];
+    let headSize = 0;
+    const tail: Buffer[] = [];
+    let tailSize = 0;
     let done = false;
     const finish = (streamOk: boolean) => {
       if (done) return;
       done = true;
       const clientGone = controller.signal.aborted || (res.destroyed && !res.writableFinished);
       const status: JournalStatus = clientGone ? 'unknown' : streamOk && up.ok ? 'completed' : 'failed';
-      const usage = responseUsage(up.headers.get('content-type') ?? '', Buffer.concat(chunks));
+      // The tail may start mid-event; the parser skips unparseable fragments.
+      const copy = tailSize ? Buffer.concat([...head, Buffer.from('\n\n'), ...tail]) : Buffer.concat(head);
+      const usage = responseUsage(up.headers.get('content-type') ?? '', copy);
       this.journalAppend(telem.key, { decisionId: telem.decisionId, status, at: Date.now(), ...(usage ? { usage } : {}) });
     };
     stream.on('data', (c: Buffer) => {
-      if (size >= TELEMETRY_CAP) return;
-      chunks.push(c);
-      size += c.length;
+      if (headSize < TELEMETRY_CAP / 2) {
+        head.push(c);
+        headSize += c.length;
+        return;
+      }
+      tail.push(c);
+      tailSize += c.length;
+      while (tailSize > TELEMETRY_CAP / 2 && tail.length > 1) tailSize -= tail.shift()!.length;
     });
     stream.on('end', () => finish(true));
     stream.on('error', () => finish(false));

@@ -430,7 +430,8 @@ test('canonicalization: cache_control inside tool arguments is real input, block
     { phase: { choice: 'verifying', confidence: 0.9 }, step_difficulty: { score: 1.0 }, stuck: { noul: 0.1 } },
   ]);
   const dir = tmpdir();
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  let decisions = 0;
+  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, onDecision: () => { decisions++; } });
   const url = await gw.listen();
   try {
     const m1 = [u('rename x to y')];
@@ -439,7 +440,43 @@ test('canonicalization: cache_control inside tool arguments is real input, block
     await post(url, body(m2));
     const m3 = [...m1, withArgsCc, r('t1', 'dates.js')]; // same index, args differ only by cache_control
     await post(url, body(m3));
-    assert.equal(jev.calls, 3, 'a cache_control inside tool arguments is a new boundary');
+    // Count routing decisions, not Jev calls: the selective policy decides routine steps locally.
+    assert.equal(decisions, 3, 'a cache_control inside tool arguments is a new boundary');
+  } finally {
+    await gw.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('telemetry: a response longer than the copy cap still records the final usage', async () => {
+  // ~600 KB of content deltas between message_start and message_delta, like a large file write.
+  const filler = 'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"' + 'x'.repeat(2000) + '"}}\n\n';
+  const long = SSE_OK.split('event: message_delta')[0] + filler.repeat(300) + 'event: message_delta' + SSE_OK.split('event: message_delta')[1];
+  const up = await fakeUpstream((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(long);
+    });
+  });
+  const jev = scriptedJev([
+    { task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } },
+  ]);
+  const dir = tmpdir();
+  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const base = await gw.listen();
+  try {
+    const m1 = [u('write a big file')];
+    const sse = await post(base, body(m1));
+    assert.equal(sse.length, long.length, 'the client receives every byte');
+    const j = new Journal(dir);
+    const key = journalKey('sess-1', m1);
+    assert.ok(await until(() => j.records(key).at(-1)?.status === 'completed'));
+    const rec = j.records(key).at(-1)!;
+    assert.equal(rec.usage!.inputTokens, 100, 'message_start usage from the head');
+    assert.equal(rec.usage!.outputTokens, 42, 'final message_delta usage from the tail');
+    assert.equal(rec.usage!.stopReason, 'end_turn');
   } finally {
     await gw.close();
     up.close();
