@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "jev-opus",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Hand tasks to Claude Opus 5.5 with the effort level re-picked every step by the TypeSafe Jev reflex, cache-safe",
   "author": {
     "name": "WXK-AI"
