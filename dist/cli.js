@@ -2,6 +2,7 @@
 import { auditJournal, formatAudit } from './gateway/audit.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { childEnv } from './claude/env.js';
@@ -10,6 +11,9 @@ import { CONFIG_DIR, CONFIG_ENV_FILE, PROJECT_ROOT, config } from './config.js';
 import { EFFORT_LEVELS, isEffort } from './effort.js';
 import { JevClient } from './jev/client.js';
 import { EffortRouter } from './router/router.js';
+// Node's Happy Eyeballs gives each address 250ms to connect; on slower links every
+// upstream fetch fails with ETIMEDOUT even though curl connects fine.
+net.setDefaultAutoSelectFamilyAttemptTimeout(Number(process.env.JEV_OPUS_CONNECT_ATTEMPT_MS) || 2000);
 import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, logToGateway, statusline } from './gateway/launch.js';
 import { inlineEffortSettings } from './gateway/display.js';
 import { createTrace } from './trace.js';

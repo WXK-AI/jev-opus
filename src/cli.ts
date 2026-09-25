@@ -2,6 +2,7 @@
 import { auditJournal, formatAudit } from './gateway/audit.ts';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import type { PermissionMode, SettingSource } from '@anthropic-ai/claude-agent-sdk';
@@ -11,6 +12,10 @@ import { CONFIG_DIR, CONFIG_ENV_FILE, PROJECT_ROOT, config } from './config.ts';
 import { EFFORT_LEVELS, isEffort, type Effort } from './effort.ts';
 import { JevClient } from './jev/client.ts';
 import { EffortRouter } from './router/router.ts';
+// Node's Happy Eyeballs gives each address 250ms to connect; on slower links every
+// upstream fetch fails with ETIMEDOUT even though curl connects fine.
+net.setDefaultAutoSelectFamilyAttemptTimeout(Number(process.env.JEV_OPUS_CONNECT_ATTEMPT_MS) || 2000);
+
 import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, logToGateway, statusline } from './gateway/launch.ts';
 import { inlineEffortSettings } from './gateway/display.ts';
 import { createTrace } from './trace.ts';
