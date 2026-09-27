@@ -27,6 +27,20 @@ export declare function checkClaude(bin: string, env: Record<string, string>): {
     ok: false;
     message: string;
 };
+/** Every distinct `claude` executable on PATH, in PATH order. */
+export declare function claudeCandidates(env: Record<string, string | undefined>): string[];
+/**
+ * The Claude Code to launch: JEV_OPUS_CLAUDE_PATH if set, otherwise the first `claude` that is new
+ * enough. An old copy earlier on PATH (e.g. an nvm global) no longer shadows a newer install.
+ */
+export declare function resolveClaude(explicit: string | undefined, env: Record<string, string>): {
+    ok: true;
+    bin: string;
+    version: string;
+} | {
+    ok: false;
+    message: string;
+};
 export declare function launchClaude(jev: JevLike | null, bounds: Bounds, claudeArgs: string[], trace?: (e: Record<string, unknown>) => void): Promise<number>;
 /** Claude Code statusLine command: shows the effort Jev picked for this session. */
 export declare function statusline(): Promise<void>;

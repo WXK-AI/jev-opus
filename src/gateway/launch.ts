@@ -89,6 +89,47 @@ export function checkClaude(bin: string, env: Record<string, string>): { ok: tru
   return { ok: false, message: `"claude" on your PATH is Claude Code ${version} (${where}), which can't use Opus 5.5; ${MIN_CLAUDE_VERSION} or newer is needed. Update it (\`claude update\`, or \`brew upgrade claude-code@latest\`), remove the old copy, or set JEV_OPUS_CLAUDE_PATH to a newer one.` };
 }
 
+/** Every distinct `claude` executable on PATH, in PATH order. */
+export function claudeCandidates(env: Record<string, string | undefined>): string[] {
+  const dirs = (env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  const seen = new Set<string>(), out: string[] = [];
+  for (const d of dirs) {
+    const bin = path.join(d, 'claude');
+    try {
+      fs.accessSync(bin, fs.constants.X_OK);
+      const real = fs.realpathSync(bin);
+      if (!fs.statSync(real).isFile() || seen.has(real)) continue;
+      seen.add(real);
+      out.push(bin);
+    } catch { /* not here */ }
+  }
+  return out;
+}
+
+/**
+ * The Claude Code to launch: JEV_OPUS_CLAUDE_PATH if set, otherwise the first `claude` that is new
+ * enough. An old copy earlier on PATH (e.g. an nvm global) no longer shadows a newer install.
+ */
+export function resolveClaude(explicit: string | undefined, env: Record<string, string>): { ok: true; bin: string; version: string } | { ok: false; message: string } {
+  if (explicit) {
+    const r = checkClaude(explicit, env);
+    return r.ok ? { ok: true, bin: explicit, version: r.version } : r;
+  }
+  const candidates = claudeCandidates(env);
+  let first: { ok: false; message: string } | null = null;
+  for (const bin of candidates) {
+    const r = checkClaude(bin, env);
+    if (r.ok) return { ok: true, bin, version: r.version };
+    first ??= r;
+  }
+  if (!first) {
+    const r = checkClaude('claude', env);
+    return r.ok ? { ok: true, bin: 'claude', version: r.version } : r;
+  }
+  if (candidates.length > 1) first.message += ` (Also checked: ${candidates.slice(1).join(', ')}; none is new enough.)`;
+  return first;
+}
+
 export async function launchClaude(jev: JevLike | null, bounds: Bounds, claudeArgs: string[], trace?: (e: Record<string, unknown>) => void): Promise<number> {
   const gateway = createGateway(jev, bounds, { trace, quiet: true });
   const baseUrl = await gateway.listen();
@@ -108,13 +149,12 @@ export async function launchClaude(jev: JevLike | null, bounds: Bounds, claudeAr
     });
     if (!args.some((a) => a === '--model' || a.startsWith('--model='))) args.unshift('--model', JEV_MODEL_ID);
 
-    const bin = config.claudePath ?? 'claude';
-    const found = checkClaude(bin, env);
+    const found = resolveClaude(config.claudePath, env);
     if (!found.ok) {
       console.error(`jev-opus: ${found.message}`);
       return 1;
     }
-    const child = spawn(bin, args, { stdio: 'inherit', env });
+    const child = spawn(found.bin, args, { stdio: 'inherit', env });
     return await new Promise<number>((resolve) => {
       child.on('exit', (c, sig) => resolve(c ?? (sig ? 1 : 0)));
       child.on('error', (err) => {

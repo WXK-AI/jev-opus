@@ -256,3 +256,27 @@ test('Claude Code version guard', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an old claude earlier on PATH does not shadow a newer one', async () => {
+  const { resolveClaude } = await import('../src/gateway/launch.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-claude-'));
+  try {
+    const oldDir = path.join(dir, 'nvm'), newDir = path.join(dir, 'brew');
+    fs.mkdirSync(oldDir);
+    fs.mkdirSync(newDir);
+    fs.writeFileSync(path.join(oldDir, 'claude'), '#!/bin/sh\necho "2.1.195 (Claude Code)"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(newDir, 'claude'), '#!/bin/sh\necho "2.1.283 (Claude Code)"\n', { mode: 0o755 });
+    const env = { PATH: `${oldDir}:${newDir}:/usr/bin:/bin`, HOME: dir };
+    assert.deepEqual(resolveClaude(undefined, env), { ok: true, bin: path.join(newDir, 'claude'), version: '2.1.283' });
+    // An explicit path is used as given, even when a newer copy exists.
+    const pinned = resolveClaude(path.join(oldDir, 'claude'), env);
+    assert.equal(pinned.ok, false);
+    // Only old copies: the error names the first and lists the others.
+    fs.writeFileSync(path.join(newDir, 'claude'), '#!/bin/sh\necho "2.1.200 (Claude Code)"\n', { mode: 0o755 });
+    const none = resolveClaude(undefined, env);
+    assert.equal(none.ok, false);
+    assert.match(!none.ok ? none.message : '', /2\.1\.195.*Also checked: .*brew\/claude/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

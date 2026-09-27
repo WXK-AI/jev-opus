@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { auditJournal, formatAudit } from './gateway/audit.ts';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -16,7 +15,7 @@ import { EffortRouter } from './router/router.ts';
 // upstream fetch fails with ETIMEDOUT even though curl connects fine.
 net.setDefaultAutoSelectFamilyAttemptTimeout(Number(process.env.JEV_OPUS_CONNECT_ATTEMPT_MS) || 2000);
 
-import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, logToGateway, statusline } from './gateway/launch.ts';
+import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, logToGateway, resolveClaude, statusline } from './gateway/launch.ts';
 import { inlineEffortSettings } from './gateway/display.ts';
 import { createTrace } from './trace.ts';
 import { c, fmtEffort, formatDecision, formatReport, Terminal } from './ui.ts';
@@ -332,14 +331,12 @@ async function doctor(router: EffortRouter, jev: JevClient | null, model: string
   const bad = (m: string) => console.log(`${c.red('✗')} ${m}`);
   let failures = 0;
 
-  const claudeBin = config.claudePath ?? 'claude';
   const { env, credential } = childEnv();
-  try {
-    const v = execFileSync(claudeBin, ['--version'], { encoding: 'utf8', env }).trim();
-    ok(`Claude Code: ${v} (${claudeBin})`);
-  } catch (err) {
+  const found = resolveClaude(config.claudePath, env);
+  if (found.ok) ok(`Claude Code: ${found.version} (${found.bin})`);
+  else {
     failures++;
-    bad(`Claude Code not runnable at "${claudeBin}": ${(err as Error).message}`);
+    bad(`Claude Code: ${found.message}`);
   }
   console.log(`  credential for Claude: ${credential}`);
 
