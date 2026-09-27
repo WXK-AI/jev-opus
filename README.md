@@ -1,4 +1,4 @@
-# jev-opus
+<h1 align="center"><img src="assets/banner.svg" width="860" alt="jev-opus: Claude Opus 5.5 with effort re-picked by Jev at every step (medium, then high after a failing test, back to medium once it passes) over one unbroken prompt cache"></h1>
 
 **Claude Opus 5.5 with the effort level re-decided at every step, without breaking the prompt cache.**
 

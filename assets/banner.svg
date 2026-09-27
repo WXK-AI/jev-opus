@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="330" viewBox="0 0 860 330" role="img" aria-label="jev-opus: Claude Opus 5.5 with the effort level re-picked by Jev at every step. Effort goes medium, medium, medium, then high after a failing test, stays high until the test passes, and returns to medium, while one prompt cache runs unbroken underneath.">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #c9d1d9; }
+    .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .dim { fill: #8b949e; }
+    .lvl { font-size: 11px; font-weight: 700; fill: #0d1117; text-anchor: middle; }
+    .step { font-size: 13px; text-anchor: middle; }
+    .ok { fill: #3fb950; } .fail { fill: #f85149; }
+  </style>
+  <defs>
+    <linearGradient id="cache" x1="0" x2="1">
+      <stop offset="0" stop-color="#1f6feb" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#1f6feb" stop-opacity="0.7"/>
+    </linearGradient>
+  </defs>
+  <rect x="0.5" y="0.5" width="859" height="329" rx="12" fill="#0d1117" stroke="#30363d"/>
+
+  <!-- mark + wordmark -->
+  <g transform="translate(40 34)">
+    <rect x="1" y="1" width="70" height="70" rx="16" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect x="15" y="44" width="11" height="14" rx="2.5" fill="#3fb950"/>
+    <rect x="30.5" y="34" width="11" height="24" rx="2.5" fill="#39c5cf"/>
+    <rect x="46" y="24" width="11" height="34" rx="2.5" fill="#e3b341"/>
+    <path d="M51.5 8 L57 13.5 L51.5 19 L46 13.5 Z" fill="#d2a8ff"/>
+  </g>
+  <text x="130" y="76" font-size="40" font-weight="700" fill="#e6edf3">jev-opus</text>
+  <text x="131" y="104" class="sans dim" font-size="16">Claude Opus 5.5 · effort re-picked at every step · prompt cache intact</text>
+
+  <!-- legend -->
+  <g font-size="12" class="sans">
+    <rect x="628" y="30" width="10" height="10" rx="2" fill="#3fb950"/><text x="643" y="39" class="sans dim">low</text>
+    <rect x="678" y="30" width="10" height="10" rx="2" fill="#39c5cf"/><text x="693" y="39" class="sans dim">medium</text>
+    <rect x="750" y="30" width="10" height="10" rx="2" fill="#e3b341"/><text x="765" y="39" class="sans dim">high</text>
+    <path d="M630 52 L635 57 L630 62 L625 57 Z" fill="#d2a8ff"/><text x="643" y="61" class="sans dim">Jev decides before each API call</text>
+  </g>
+
+  <!-- decision trace connecting the Jev picks -->
+  <path d="M105 194 L235 194 L365 194 L495 162 L625 162 L755 194" fill="none" stroke="#d2a8ff" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="4 4"/>
+
+  <!-- steps: bar height = effort in force for that step -->
+  <g>
+    <rect x="70" y="206" width="70" height="44" rx="5" fill="#39c5cf"/><text x="105" y="222" class="lvl">MEDIUM</text>
+    <path d="M105 188 L111 194 L105 200 L99 194 Z" fill="#d2a8ff"/>
+    <text x="105" y="272" class="step">plan</text>
+
+    <rect x="200" y="206" width="70" height="44" rx="5" fill="#39c5cf"/><text x="235" y="222" class="lvl">MEDIUM</text>
+    <path d="M235 188 L241 194 L235 200 L229 194 Z" fill="#d2a8ff"/>
+    <text x="235" y="272" class="step">Read</text>
+
+    <rect x="330" y="206" width="70" height="44" rx="5" fill="#39c5cf"/><text x="365" y="222" class="lvl">MEDIUM</text>
+    <path d="M365 188 L371 194 L365 200 L359 194 Z" fill="#d2a8ff"/>
+    <text x="365" y="272" class="step">test <tspan class="fail">✗</tspan></text>
+
+    <rect x="460" y="174" width="70" height="76" rx="5" fill="#e3b341"/><text x="495" y="190" class="lvl">HIGH</text>
+    <path d="M495 156 L501 162 L495 168 L489 162 Z" fill="#d2a8ff"/>
+    <text x="495" y="272" class="step">Edit</text>
+
+    <rect x="590" y="174" width="70" height="76" rx="5" fill="#e3b341"/><text x="625" y="190" class="lvl">HIGH</text>
+    <path d="M625 156 L631 162 L625 168 L619 162 Z" fill="#d2a8ff"/>
+    <text x="625" y="272" class="step">test <tspan class="ok">✓</tspan></text>
+
+    <rect x="720" y="206" width="70" height="44" rx="5" fill="#39c5cf"/><text x="755" y="222" class="lvl">MEDIUM</text>
+    <path d="M755 188 L761 194 L755 200 L749 194 Z" fill="#d2a8ff"/>
+    <text x="755" y="272" class="step">done</text>
+  </g>
+  <line x1="60" y1="250.5" x2="800" y2="250.5" stroke="#30363d"/>
+
+  <!-- one cache, never reset -->
+  <rect x="60" y="288" width="740" height="18" rx="9" fill="url(#cache)"/>
+  <text x="430" y="301" font-size="11" text-anchor="middle" fill="#e6edf3" class="sans">one prompt cache across every effort switch · no prefix rewrite</text>
+</svg>
