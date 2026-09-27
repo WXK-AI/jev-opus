@@ -137,7 +137,8 @@ test('Jev changes effort mid-prompt: failing test → high, hold, finishing → 
   assert.deepEqual(report.callEfforts, claude.efforts, 'report matches what the CLI used');
   assert.deepEqual(report.observedEfforts, ['medium', 'high', 'high']);
   assert.equal(report.decisions.length, 4);
-  assert.match(jev.states[1]!, /npm test → FAILED: Exit code 1/);
+  assert.match(jev.states[1]!, /Bash: failed; check yes/);
+  assert.doesNotMatch(jev.states[1]!, /npm test|Exit code 1/);
   assert.match(jev.states[1]!, /consecutive failed tool calls: 1/);
   assert.equal(report.usage.cacheRead, 1000 + 2000 + 3000 + 4000);
 });

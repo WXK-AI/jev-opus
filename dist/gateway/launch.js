@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { childEnv } from '../claude/env.js';
 import { CONFIG_DIR, config } from '../config.js';
 import { formatDecision } from '../ui.js';
-import { JevGateway, readStatus } from './server.js';
+import { GATEWAY_AUTH_HEADER, JevGateway, readStatus } from './server.js';
 import { inlineEffortSettings } from './display.js';
 import { withGatewaySettings, withNarration } from './settings.js';
 export const JEV_MODEL_ID = 'jev/claude-opus-5-5';
@@ -13,9 +13,10 @@ export const STATUS_DIR = path.join(CONFIG_DIR, 'status');
 export const GATEWAY_LOG = path.join(CONFIG_DIR, 'gateway.log');
 export const JOURNAL_DIR = path.join(CONFIG_DIR, 'journal');
 /** Env that makes Claude Code route through the gateway and list "Opus 5.5 · Jev" in /model. */
-export function gatewayClientEnv(baseUrl) {
+export function gatewayClientEnv(baseUrl, authToken) {
     return {
         ANTHROPIC_BASE_URL: baseUrl,
+        ANTHROPIC_CUSTOM_HEADERS: `${GATEWAY_AUTH_HEADER}: ${authToken}`,
         ANTHROPIC_CUSTOM_MODEL_OPTION: JEV_MODEL_ID,
         ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: 'Opus 5.5 · Jev',
         ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'Opus 5.5 with effort re-picked every step by Jev (low/medium/high), cache-safe',
@@ -96,7 +97,7 @@ export async function launchClaude(jev, bounds, claudeArgs, trace) {
     const gateway = createGateway(jev, bounds, { trace, quiet: true });
     const baseUrl = await gateway.listen();
     const { env } = childEnv(process.env, { connectors: true });
-    Object.assign(env, gatewayClientEnv(baseUrl));
+    Object.assign(env, gatewayClientEnv(baseUrl, gateway.authToken));
     try {
         const cli = fileURLToPath(new URL('../cli.' + (import.meta.url.endsWith('.ts') ? 'ts' : 'js'), import.meta.url));
         const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;

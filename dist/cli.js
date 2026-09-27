@@ -8,7 +8,7 @@ import { parseArgs } from 'node:util';
 import { childEnv } from './claude/env.js';
 import { JevOpusSession } from './claude/session.js';
 import { CONFIG_DIR, CONFIG_ENV_FILE, PROJECT_ROOT, config } from './config.js';
-import { EFFORT_LEVELS, isEffort } from './effort.js';
+import { EFFORT_LEVELS, isEffort, rank } from './effort.js';
 import { JevClient } from './jev/client.js';
 import { EffortRouter } from './router/router.js';
 // Node's Happy Eyeballs gives each address 250ms to connect; on slower links every
@@ -56,6 +56,30 @@ function effortArg(name, v, fallback) {
         process.exit(2);
     }
     return v;
+}
+function integerArg(name, value, fallback, min, max) {
+    if (value === undefined)
+        return fallback;
+    const parsed = Number(value);
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+        throw new Error(`--${name} must be an integer from ${min} to ${max}`);
+    }
+    return parsed;
+}
+function permissionArg(value) {
+    const modes = ['default', 'acceptEdits', 'auto', 'plan', 'dontAsk', 'bypassPermissions'];
+    const mode = value ?? 'acceptEdits';
+    if (!modes.includes(mode))
+        throw new Error(`--permission-mode must be one of ${modes.join(', ')}`);
+    return mode;
+}
+function settingsArg(value) {
+    const allowed = ['user', 'project', 'local'];
+    const sources = (value ?? 'project,local').split(',').map((s) => s.trim());
+    if (sources.some((s) => !allowed.includes(s)) || new Set(sources).size !== sources.length) {
+        throw new Error(`--settings must be a comma-separated list of ${allowed.join(', ')} without duplicates`);
+    }
+    return sources;
 }
 async function readStdin() {
     const chunks = [];
@@ -109,7 +133,14 @@ async function main() {
         return;
     }
     const bounds = { min: effortArg('min', values.min, config.minEffort), max: effortArg('max', values.max, config.maxEffort) };
+    if (rank(bounds.min) > rank(bounds.max))
+        throw new Error('--min cannot be higher than --max');
     const pinned = values.effort ? effortArg('effort', values.effort, 'medium') : null;
+    const requestedPermission = permissionArg(values['permission-mode']);
+    const permissionMode = values.yolo ? 'bypassPermissions' : requestedPermission;
+    const settingSources = settingsArg(values.settings);
+    const maxTurns = integerArg('max-turns', values['max-turns'], undefined, 1, Number.MAX_SAFE_INTEGER);
+    const port = integerArg('port', values.port, 47821, 0, 65535);
     const jev = positionals[0] === 'doctor' || values['route-only'] ? (values['no-jev'] ? null : new JevClient()) : await jevClient(values['no-jev']);
     const router = new EffortRouter({ jev, bounds, pinned });
     const terminal = new Terminal(values.verbose ?? false, values.json ?? false);
@@ -118,7 +149,7 @@ async function main() {
     if (positionals[0] === 'doctor')
         return doctor(router, jev, values.model ?? config.model, values.settings);
     if (positionals[0] === 'gateway')
-        return gateway(jev, bounds, Number(values.port ?? 47821));
+        return gateway(jev, bounds, port);
     let prompt = positionals.join(' ').trim();
     if (!prompt && !process.stdin.isTTY)
         prompt = (await readStdin()).trim();
@@ -132,8 +163,6 @@ async function main() {
     if (!router.usingJev && !pinned) {
         notice(c.yellow(values['no-jev'] ? 'Jev disabled — routing with local heuristics.' : 'No Jev key (JEV_API_KEY or OPENROUTER_API_KEY) — routing with local heuristics.'));
     }
-    const permissionMode = (values.yolo ? 'bypassPermissions' : values['permission-mode'] ?? 'acceptEdits');
-    const settingSources = (values.settings ?? 'project,local').split(',').map((s) => s.trim()).filter(Boolean);
     const { env, credential } = childEnv();
     const trace = createTrace(config.traceDir);
     const cwd = path.resolve(values.workspace ?? process.cwd());
@@ -147,7 +176,7 @@ async function main() {
         canUseTool: process.stdin.isTTY && permissionMode !== 'bypassPermissions' ? terminal.canUseTool() : undefined,
         settingSources,
         claudePath: config.claudePath,
-        maxTurns: values['max-turns'] ? Number(values['max-turns']) : undefined,
+        maxTurns,
         observer: terminal.observer(),
         trace: trace.write,
     });
@@ -190,11 +219,11 @@ async function gateway(jev, bounds, port) {
     const trace = createTrace(config.traceDir);
     const gw = createGateway(jev && jev.enabled ? jev : null, bounds, { port, echo: true, trace: trace.write });
     const url = await gw.listen();
-    const env = gatewayClientEnv(url);
+    const env = gatewayClientEnv(url, gw.authToken);
     console.log(`Jev gateway on ${url} · effort ${bounds.min}..${bounds.max} · ${jev?.enabled ? 'Jev' : 'heuristics'} · log ${GATEWAY_LOG}`);
     console.log(c.dim('Point Claude Code at it (CLI shell, VS Code "claudeCode.environmentVariables", Agent SDK env):'));
     for (const [k, v] of Object.entries(env))
-        console.log(c.dim(`  ${k}=${v}`));
+        console.log(c.dim(`  ${k}=${JSON.stringify(v)}`));
     console.log(c.dim(`then pick "Opus 5.5 · Jev" in /model (or --model ${JEV_MODEL_ID}). Ctrl-C to stop.`));
     console.log(c.dim('For inline effort badges, merge these session hooks into your Claude Code settings (valid while this gateway runs):'));
     console.log(JSON.stringify(inlineEffortSettings(url + gw.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES !== '0' }), null, 2));

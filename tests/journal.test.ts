@@ -6,9 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { Journal, type JournalRecord } from '../src/gateway/journal.ts';
-import { JevGateway } from '../src/gateway/server.ts';
+import { GATEWAY_AUTH_HEADER, JevGateway } from '../src/gateway/server.ts';
 import { prefixHashes, type Message } from '../src/gateway/transcript.ts';
 import { neutralAnswers, parseAnswers, type JevLike, type JevQuestion, type JevResult } from '../src/jev/client.ts';
+
+const TEST_AUTH_TOKEN = 'test-gateway-token';
+const testGateway = (opts: ConstructorParameters<typeof JevGateway>[0]) => new JevGateway({ ...opts, authToken: TEST_AUTH_TOKEN });
 
 function scriptedJev(script: Array<Record<string, unknown>>): JevLike & { calls: number } {
   const jev = {
@@ -53,7 +56,7 @@ async function fakeUpstream(handler?: Handler): Promise<{ url: string; seen: See
 async function post(base: string, body: unknown, headers: Record<string, string> = {}): Promise<string> {
   const res = await fetch(`${base}/v1/messages`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', authorization: 'Bearer secret', ...headers },
+    headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', authorization: 'Bearer secret', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN, ...headers },
     body: JSON.stringify(body),
   });
   return res.text();
@@ -81,6 +84,24 @@ async function until(cond: () => boolean, ms = 2000): Promise<boolean> {
 function tmpdir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'jev-journal-'));
 }
+
+test('a new append repairs an interrupted final journal line', () => {
+  const dir = tmpdir();
+  try {
+    const journal = new Journal(dir);
+    journal.append('session', { decisionId: 'd1', status: 'sent', at: 1 });
+    const file = path.join(dir, fs.readdirSync(dir)[0]!);
+    fs.appendFileSync(file, '{"decisionId":"interrupted');
+    assert.equal(journal.events('session').length, 1, 'the incomplete tail is ignored before recovery');
+    journal.append('session', { decisionId: 'd1', status: 'completed', at: 2 });
+    assert.deepEqual(journal.events('session').map((event) => 'status' in event ? event.status : undefined), ['sent', 'completed']);
+
+    // A complete JSON record with only its newline missing remains valid.
+    fs.appendFileSync(file, '{"decisionId":"d2","status":"sent","at":3}');
+    journal.append('session', { decisionId: 'd2', status: 'completed', at: 4 });
+    assert.deepEqual(journal.events('session').map((event) => 'status' in event ? event.status : undefined), ['sent', 'completed', 'sent', 'completed']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('journal folds status/usage updates onto prepared records and stays owner-only', () => {
   const dir = tmpdir();
@@ -128,7 +149,7 @@ test('single-flight: a duplicate request joins the in-flight decision and reuses
     },
   };
   const dir = tmpdir();
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
   const base = await gw.listen();
   try {
     const request = body([u('fix the flaky date test')]);
@@ -160,7 +181,7 @@ test('changed history at the same boundary is a new decision routed from the com
     { phase: { choice: 'diagnosing', confidence: 0.9 }, step_difficulty: { score: 3.5 }, stuck: { noul: 0.1 } }, // failed result → high
   ]);
   const dir = tmpdir();
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
   const base = await gw.listen();
   try {
     const m1 = [u('rename x to y')];
@@ -199,7 +220,7 @@ test('thread eviction rebuilds from the journal: maxThreads 1 keeps the original
     { phase: { choice: 'verifying', confidence: 0.9 }, step_difficulty: { score: 1.0 }, stuck: { noul: 0.1 } }, // A step
   ]);
   const dir = tmpdir();
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, maxThreads: 1 });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, maxThreads: 1 });
   const base = await gw.listen();
   try {
     const mA = [u('rename x to y')];
@@ -230,7 +251,7 @@ test('gateway restart: a new instance continues the conversation from the same j
   const jev1 = scriptedJev([
     { task_type: { choice: 'debugging', confidence: 0.9 }, difficulty: { score: 1.0 }, stakes: { noul: 0.1 } },
   ]);
-  const gw1 = new JevGateway({ jev: jev1, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const gw1 = testGateway({ jev: jev1, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
   const base1 = await gw1.listen();
   await post(base1, body(m1));
   const sent1 = up.seen.at(-1)!.body!.messages as Message[];
@@ -239,7 +260,7 @@ test('gateway restart: a new instance continues the conversation from the same j
   const jev2 = scriptedJev([
     { phase: { choice: 'diagnosing', confidence: 0.9 }, step_difficulty: { score: 3.5 }, stuck: { noul: 0.1 } }, // → high
   ]);
-  const gw2 = new JevGateway({ jev: jev2, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const gw2 = testGateway({ jev: jev2, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
   const base2 = await gw2.listen();
   try {
     const m2 = [...m1, a('t1', 'npm test'), r('t1', 'Exit code 1', true)];
@@ -267,7 +288,7 @@ test('telemetry: SSE usage and stop_reason are journaled as completed', async ()
     { task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } },
   ]);
   const dir = tmpdir();
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
   const base = await gw.listen();
   try {
     const m1 = [u('rename x to y')];
@@ -301,7 +322,7 @@ test('telemetry: non-streaming JSON usage completes; upstream error status fails
   });
   const dir = tmpdir();
   const jev = scriptedJev([{ task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } }]);
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: jsonUp.url, journalDir: dir });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: jsonUp.url, journalDir: dir });
   const base = await gw.listen();
   try {
     const m1 = [u('rename x to y')];
@@ -323,7 +344,7 @@ test('telemetry: non-streaming JSON usage completes; upstream error status fails
     req.on('data', () => undefined);
     req.on('end', () => res.writeHead(500).end('upstream exploded'));
   });
-  const gw2 = new JevGateway({
+  const gw2 = testGateway({
     jev: scriptedJev([{ task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } }]),
     bounds: { min: 'low', max: 'high' },
     upstream: failUp.url,
@@ -334,7 +355,7 @@ test('telemetry: non-streaming JSON usage completes; upstream error status fails
     const m2 = [u('rename y to z')];
     const res = await fetch(`${base2}/v1/messages`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-2' },
+      headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-2', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN },
       body: JSON.stringify(body(m2)),
     });
     assert.equal(res.status, 500, 'the upstream error status passes through');
@@ -361,14 +382,14 @@ test('telemetry: a client disconnect leaves the outcome unknown, never deleting 
   });
   const jev = scriptedJev([{ task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } }]);
   const dir = tmpdir();
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
   const base = await gw.listen();
   try {
     const m1 = [u('rename x to y')];
     const ac = new AbortController();
     const res = await fetch(`${base}/v1/messages`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1' },
+      headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN },
       body: JSON.stringify(body(m1)),
       signal: ac.signal,
     });
@@ -394,7 +415,7 @@ test('journal stores hashes and efforts only — no prompt text or credentials',
   const up = await fakeUpstream();
   const jev = scriptedJev([{ task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } }]);
   const dir = tmpdir();
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
   const base = await gw.listen();
   try {
     await post(base, body([u('rename the SECRETPHRASE token')]), { authorization: 'Bearer topsecretvalue' });
@@ -431,7 +452,7 @@ test('canonicalization: cache_control inside tool arguments is real input, block
   ]);
   const dir = tmpdir();
   let decisions = 0;
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, onDecision: () => { decisions++; } });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, onDecision: () => { decisions++; } });
   const url = await gw.listen();
   try {
     const m1 = [u('rename x to y')];
@@ -464,7 +485,7 @@ test('telemetry: a response longer than the copy cap still records the final usa
     { task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } },
   ]);
   const dir = tmpdir();
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
   const base = await gw.listen();
   try {
     const m1 = [u('write a big file')];
@@ -491,7 +512,7 @@ test('a next-prompt suggestion fork replays statements but is never routed or re
   ]);
   const dir = tmpdir();
   const decided: string[] = [];
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, onDecision: (_s, d) => decided.push(d.kind) });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, onDecision: (_s, d) => decided.push(d.kind) });
   const base = await gw.listen();
   try {
     const m1 = [u('the date test fails, fix it')];
@@ -516,7 +537,7 @@ test('retries have separate attempts, summed usage, stable decision IDs, and dur
   const up = await fakeUpstream();
   const dir = tmpdir();
   const traces: Array<Record<string, unknown>> = [];
-  const gw = new JevGateway({ jev: null, bounds: { min: 'medium', max: 'medium' }, upstream: up.url, journalDir: dir, trace: (e) => traces.push(e) });
+  const gw = testGateway({ jev: null, bounds: { min: 'medium', max: 'medium' }, upstream: up.url, journalDir: dir, trace: (e) => traces.push(e) });
   const base = await gw.listen();
   try {
     const messages = [u('test audit')];
@@ -550,7 +571,7 @@ test('HTTP 200 stream errors fail; EOF without message_stop remains unknown', as
     const text = SSE_OK.split('event: message_delta')[0] + (scenario === 'error' ? 'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"PRIVATE"}}\n\n' : '');
     const up = await fakeUpstream((req,res) => { req.resume(); req.on('end',() => res.writeHead(200,{'content-type':'text/event-stream'}).end(text)); });
     const dir = tmpdir();
-    const gw = new JevGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:dir});
+    const gw = testGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:dir});
     const base = await gw.listen();
     try {
       const messages = [u('test protocol')];
@@ -568,10 +589,10 @@ test('a failed prepared-journal write prevents dispatch', async () => {
   const dir = tmpdir();
   const blocked = path.join(dir,'not-a-directory');
   fs.writeFileSync(blocked,'blocked');
-  const gw = new JevGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:blocked});
+  const gw = testGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:blocked});
   const base = await gw.listen();
   try {
-    const response = await fetch(base + '/v1/messages',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body([u('do not dispatch')]))});
+    const response = await fetch(base + '/v1/messages',{method:'POST',headers:{'content-type':'application/json',[GATEWAY_AUTH_HEADER]:TEST_AUTH_TOKEN},body:JSON.stringify(body([u('do not dispatch')]))});
     assert.equal(response.status,502);
     await response.text();
     assert.equal(up.seen.length,0);
@@ -589,7 +610,7 @@ test('a late audit-write failure preserves the response and surfaces degraded co
       res.writeHead(200,{'content-type':'text/event-stream'}).end(SSE_OK);
     });
   });
-  const gw = new JevGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:dir,onNotice:(m)=>notices.push(m)});
+  const gw = testGateway({jev:null,bounds:{min:'low',max:'high'},upstream:up.url,journalDir:dir,onNotice:(m)=>notices.push(m)});
   const base = await gw.listen();
   try {
     assert.equal(await post(base,body([u('audit write failure')])),SSE_OK);

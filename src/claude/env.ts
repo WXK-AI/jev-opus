@@ -14,6 +14,11 @@ import { config, type ClaudeCredentials } from '../config.ts';
  */
 const INHERITED = /^(ANTHROPIC_|CLAUDE|MCP_|OTEL_)/;
 const KEEP = new Set(['CLAUDE_CONFIG_DIR']);
+// These belong to the parent router, never to Claude Code or its tool subprocesses.
+const ROUTER_SECRETS = new Set([
+  'JEV_API_KEY', 'TYPESAFE_API_KEY', 'OPENROUTER_API_KEY',
+  'JEV_OPUS_ANTHROPIC_API_KEY', 'JEV_OPUS_CLAUDE_OAUTH_TOKEN', 'JEV_OPUS_ANTHROPIC_AUTH_TOKEN',
+]);
 
 export interface ChildEnv {
   env: Record<string, string>;
@@ -27,7 +32,7 @@ export function childEnv(
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
     if (v === undefined) continue;
-    if (INHERITED.test(k) && !KEEP.has(k)) continue;
+    if ((INHERITED.test(k) && !KEEP.has(k)) || ROUTER_SECRETS.has(k)) continue;
     env[k] = v;
   }
 

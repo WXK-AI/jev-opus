@@ -7,7 +7,7 @@ import { CONFIG_DIR, config } from '../config.ts';
 import type { JevLike } from '../jev/client.ts';
 import type { Bounds } from '../router/policy.ts';
 import { formatDecision } from '../ui.ts';
-import { JevGateway, readStatus } from './server.ts';
+import { GATEWAY_AUTH_HEADER, JevGateway, readStatus } from './server.ts';
 import { inlineEffortSettings } from './display.ts';
 import { withGatewaySettings, withNarration } from './settings.ts';
 
@@ -17,9 +17,10 @@ export const GATEWAY_LOG = path.join(CONFIG_DIR, 'gateway.log');
 export const JOURNAL_DIR = path.join(CONFIG_DIR, 'journal');
 
 /** Env that makes Claude Code route through the gateway and list "Opus 5.5 · Jev" in /model. */
-export function gatewayClientEnv(baseUrl: string): Record<string, string> {
+export function gatewayClientEnv(baseUrl: string, authToken: string): Record<string, string> {
   return {
     ANTHROPIC_BASE_URL: baseUrl,
+    ANTHROPIC_CUSTOM_HEADERS: `${GATEWAY_AUTH_HEADER}: ${authToken}`,
     ANTHROPIC_CUSTOM_MODEL_OPTION: JEV_MODEL_ID,
     ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: 'Opus 5.5 · Jev',
     ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'Opus 5.5 with effort re-picked every step by Jev (low/medium/high), cache-safe',
@@ -93,7 +94,7 @@ export async function launchClaude(jev: JevLike | null, bounds: Bounds, claudeAr
   const baseUrl = await gateway.listen();
 
   const { env } = childEnv(process.env, { connectors: true });
-  Object.assign(env, gatewayClientEnv(baseUrl));
+  Object.assign(env, gatewayClientEnv(baseUrl, gateway.authToken));
 
   try {
     const cli = fileURLToPath(new URL('../cli.' + (import.meta.url.endsWith('.ts') ? 'ts' : 'js'), import.meta.url));

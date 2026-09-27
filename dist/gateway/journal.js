@@ -21,6 +21,7 @@ export class Journal {
         }
         catch { /* best effort */ }
         const file = this.file(key);
+        repairIncompleteTail(file);
         fs.appendFileSync(file, `${JSON.stringify({ schemaVersion: 2, eventId: randomUUID(), ...line })}\n`, { mode: 0o600, flush: true });
         try {
             fs.chmodSync(file, 0o600);
@@ -36,6 +37,57 @@ export class Journal {
     }
     events(key) {
         return readJournalFile(this.file(key));
+    }
+}
+/** An interrupted append must not turn into a corrupt middle line on the next write. */
+function repairIncompleteTail(file) {
+    let fd;
+    try {
+        fd = fs.openSync(file, 'r+');
+    }
+    catch (err) {
+        if (err.code === 'ENOENT')
+            return;
+        throw err;
+    }
+    try {
+        let end = fs.fstatSync(fd).size;
+        if (end === 0)
+            return;
+        const last = Buffer.alloc(1);
+        fs.readSync(fd, last, 0, 1, end - 1);
+        if (last[0] === 10)
+            return;
+        // Read only the unfinished final line. Completed journals cost one byte
+        // to check, regardless of their size.
+        const chunks = [];
+        let start = end;
+        while (start > 0) {
+            const length = Math.min(4096, start);
+            const chunk = Buffer.alloc(length);
+            fs.readSync(fd, chunk, 0, length, start - length);
+            const newline = chunk.lastIndexOf(10);
+            chunks.unshift(chunk.subarray(newline + 1));
+            start -= length;
+            if (newline >= 0) {
+                start += newline + 1;
+                break;
+            }
+        }
+        const tail = Buffer.concat(chunks).toString('utf8');
+        let complete = false;
+        try {
+            const parsed = JSON.parse(tail);
+            complete = !!parsed && typeof parsed === 'object' && typeof parsed.decisionId === 'string';
+        }
+        catch { /* incomplete JSON: discard this one line */ }
+        if (complete)
+            fs.writeSync(fd, '\n', end);
+        else
+            fs.ftruncateSync(fd, start);
+    }
+    finally {
+        fs.closeSync(fd);
     }
 }
 export function readJournalFile(file) {

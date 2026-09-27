@@ -31,15 +31,22 @@ export interface GatewayOptions {
     onNotice?: (message: string) => void;
     trace?: (event: Record<string, unknown>) => void;
     maxThreads?: number;
+    /** Optional fixed token for an embedding host; generated per gateway otherwise. */
+    authToken?: string;
+    /** Maximum proxied request size; defaults to 64 MiB. */
+    maxRequestBytes?: number;
 }
+export declare const GATEWAY_AUTH_HEADER = "x-jev-gateway-token";
 export declare class JevGateway {
     /** Ephemeral local endpoint; hook payloads are never forwarded upstream. */
     readonly displayHookPath: string;
+    readonly authToken: string;
     private readonly display;
     private auditDegraded;
     private readonly auditWarned;
     private readonly opts;
     private readonly upstream;
+    private readonly maxRequestBytes;
     private readonly journal;
     private readonly threads;
     private server;

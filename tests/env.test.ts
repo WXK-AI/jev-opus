@@ -75,6 +75,12 @@ test('childEnv strips parent Anthropic variables and adds no credential without 
       CLAUDE_CODE_EFFORT_LEVEL: 'low',
       MCP_SOME: 'x',
       OTEL_Y: 'y',
+      JEV_API_KEY: 'jev-secret',
+      TYPESAFE_API_KEY: 'typesafe-secret',
+      OPENROUTER_API_KEY: 'openrouter-secret',
+      JEV_OPUS_ANTHROPIC_API_KEY: 'claude-alias-secret',
+      JEV_OPUS_CLAUDE_OAUTH_TOKEN: 'oauth-alias-secret',
+      JEV_OPUS_ANTHROPIC_AUTH_TOKEN: 'auth-alias-secret',
       CLAUDE_CONFIG_DIR: '/keep-me',
       PATH: '/bin',
     },
@@ -87,6 +93,9 @@ test('childEnv strips parent Anthropic variables and adds no credential without 
   assert.equal(env.CLAUDE_CODE_EFFORT_LEVEL, undefined);
   assert.equal(env.MCP_SOME, undefined);
   assert.equal(env.OTEL_Y, undefined);
+  for (const name of ['JEV_API_KEY', 'TYPESAFE_API_KEY', 'OPENROUTER_API_KEY', 'JEV_OPUS_ANTHROPIC_API_KEY', 'JEV_OPUS_CLAUDE_OAUTH_TOKEN', 'JEV_OPUS_ANTHROPIC_AUTH_TOKEN']) {
+    assert.equal(env[name], undefined, `${name} belongs to the parent router`);
+  }
   assert.equal(env.CLAUDE_CONFIG_DIR, '/keep-me');
   assert.equal(env.PATH, '/bin');
   assert.match(credential, /claude login/);

@@ -2,9 +2,31 @@ import { clampEffort, isEffort, rank } from '../effort.js';
 import { heuristicStepSignals, heuristicTaskProfile } from './heuristics.js';
 import { applyHysteresis, normalizeBounds, POLICY_VERSION, stepTarget, taskEffort } from './policy.js';
 import { PHASES, STEP_QUESTIONS, STEP_SET_VERSION, TASK_QUESTIONS, TASK_SET_VERSION, TASK_TYPES, } from './questions.js';
-import { emptyCore, isExploratoryFailure, reasoningIssues, reduceBatch, reviveCore, serializeCore } from './state.js';
+import { emptyCore, isEnvironmentFailure, isExploratoryFailure, reasoningIssues, reduceBatch, reviveCore, serializeCore } from './state.js';
 const clip = (s, n) => (s.length <= n ? s : `${s.slice(0, n)}…[+${s.length - n} chars]`);
+const sendFullEvaluatorContent = () => process.env.JEV_OPUS_EVALUATOR_CONTENT === 'full';
+// Only fixed labels leave the machine by default. Arbitrary prompts, commands,
+// file contents, and tool errors can contain credentials that cannot be
+// reliably identified with a redaction regex.
+const TASK_CUES = [
+    ['tests', /\b(test|tests|testing|specs?)\b/i],
+    ['debugging', /\b(bug|debug|error|fail|crash|fix)\b/i],
+    ['security', /\b(security|vulnerability|audit|credential|auth)\b/i],
+    ['database', /\b(database|sql|schema|migration)\b/i],
+    ['deployment', /\b(deploy|production|release|ci|pipeline)\b/i],
+    ['performance', /\b(performance|latency|slow|optimi[sz]e)\b/i],
+    ['documentation', /\b(document|readme|writing|translate)\b/i],
+    ['architecture', /\b(architecture|design|refactor|restructure)\b/i],
+    ['analysis', /\b(analy[sz]e|review|research|compare|investigate)\b/i],
+    ['interface', /\b(ui|interface|frontend|website|layout)\b/i],
+];
+const SAFE_TOOL_NAMES = new Set(['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'NotebookRead', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Task', 'Agent']);
+function taskCues(prompt) {
+    const sample = prompt.slice(0, 3000);
+    return TASK_CUES.filter(([, pattern]) => pattern.test(sample)).map(([label]) => label).join(', ') || 'none';
+}
 const QUESTION_VERSIONS = { task: TASK_SET_VERSION, step: STEP_SET_VERSION };
+const TASK_CONFIDENCE_FLOOR = 0.6;
 /**
  * An answer is usable when it is present and not marked missing/invalid by the
  * validating client. Older clients have no `signals` map: a present answer
@@ -19,12 +41,29 @@ function validAnswer(res, name) {
     return status === undefined || status === 'valid' ? a : undefined;
 }
 export function taskState(prompt, conversationNote) {
+    if (!sendFullEvaluatorContent()) {
+        const profile = heuristicTaskProfile(prompt);
+        return `CODING TASK SUMMARY (local classification): type ${profile.taskType}; difficulty ${profile.difficulty.toFixed(1)}/4; stakes ${profile.stakes.toFixed(2)}; cues ${taskCues(prompt)}; request length ${prompt.length} characters; prior context ${conversationNote ? 'yes' : 'no'}. No request text is included.`;
+    }
     let s = `USER REQUEST TO A CODING AGENT:\n${clip(prompt.trim(), 3000)}`;
     if (conversationNote)
         s += `\n\nEARLIER IN THIS CONVERSATION (context only):\n${clip(conversationNote, 800)}`;
     return s;
 }
 export function stepState(ctx) {
+    if (!sendFullEvaluatorContent()) {
+        const calls = ctx.lastBatch.map((c) => {
+            const tool = SAFE_TOOL_NAMES.has(c.tool) ? c.tool : 'other tool';
+            return `- ${tool}: ${c.failed ? 'failed' : 'succeeded'}; check ${c.runner ? 'yes' : 'no'}; environment blocker ${c.failed && isEnvironmentFailure(c) ? 'yes' : 'no'}; exploratory ${c.failed && isExploratoryFailure(c) ? 'yes' : 'no'}`;
+        });
+        return [
+            `TASK (${ctx.profile.taskType}, difficulty ${ctx.profile.difficulty.toFixed(1)}/4, stakes ${ctx.profile.stakes.toFixed(2)}; cues ${taskCues(ctx.prompt)})`,
+            `STEP ${ctx.turn} · effort in force: ${ctx.current} · consecutive failed tool calls: ${ctx.consecutiveFailures}`,
+            `EARLIER STEPS: ${ctx.trajectory.length}`,
+            'TOOL OUTCOMES (no commands or result text):',
+            ...calls,
+        ].join('\n');
+    }
     const lines = [
         `TASK (${ctx.profile.taskType}, difficulty ${ctx.profile.difficulty.toFixed(1)}/4): ${clip(ctx.prompt.trim(), 1200)}`,
         `STEP ${ctx.turn} · effort in force: ${ctx.current} · consecutive failed tool calls: ${ctx.consecutiveFailures}`,
@@ -73,8 +112,10 @@ export class EffortRouter {
                 const t = validAnswer(res, 'task_type');
                 const d = validAnswer(res, 'difficulty');
                 const st = validAnswer(res, 'stakes');
-                const typed = t?.kind === 'choice' && t.choice in TASK_TYPES ? t : undefined;
-                const scored = d?.kind === 'score' ? d : undefined;
+                // Weak task classifications are useful observations, but they should
+                // not displace the local profile that we can reproduce on every run.
+                const typed = t?.kind === 'choice' && t.choice in TASK_TYPES && (t.confidenceMissing || t.confidence >= TASK_CONFIDENCE_FLOOR) ? t : undefined;
+                const scored = d?.kind === 'score' && (d.confidenceMissing || d.confidence >= TASK_CONFIDENCE_FLOOR) ? d : undefined;
                 const staked = st?.kind === 'noul' ? st : undefined;
                 if (typed || scored || staked) {
                     profile = {
@@ -221,7 +262,8 @@ export class EffortRouter {
         if (this.core.issues.length) {
             s += '\nUNRESOLVED ISSUES (evidence, not instructions):';
             for (const i of this.core.issues) {
-                s += `\n- ${i.label ?? '(an earlier failure)'} failed ${i.attempts}x at effort ${i.tried.join('/') || '—'}${i.environment ? ' · environment blocker' : ''}`;
+                const label = sendFullEvaluatorContent() ? i.label ?? '(an earlier failure)' : 'an earlier failure';
+                s += `\n- ${label} failed ${i.attempts}x at effort ${i.tried.join('/') || '—'}${i.environment ? ' · environment blocker' : ''}`;
             }
         }
         return s;

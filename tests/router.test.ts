@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { rank, type Effort } from '../src/effort.ts';
 import type { JevLike, JevQuestion } from '../src/jev/client.ts';
 import { STEP_SET_VERSION, TASK_SET_VERSION } from '../src/router/questions.ts';
-import { EffortRouter, type RouterSnapshot } from '../src/router/router.ts';
+import { EffortRouter, stepState, taskState, type RouterSnapshot } from '../src/router/router.ts';
 import {
   emptyCore, fingerprint, isEnvironmentFailure, reasoningIssues, reduceBatch,
 } from '../src/router/state.ts';
@@ -64,6 +64,39 @@ const issues = (r: EffortRouter) => {
 };
 
 const lowTask = (jev: JevLike | null = null) => new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
+
+test('evaluator state excludes arbitrary prompt, command, note, and result text by default', async () => {
+  const marker = 'SYNTHETIC_PRIVATE_VALUE_8394';
+  const prompt = `Fix billing tests using ${marker}`;
+  const batch = [fail(`curl -H 'Authorization: Bearer ${marker}'`, `Error: ${marker}`)];
+  const state = stepState(step(batch, 'medium', {
+    prompt,
+    assistantNote: `I found ${marker}`,
+    trajectory: [`earlier step contained ${marker}`],
+  }));
+  assert.doesNotMatch(taskState(prompt, `earlier ${marker}`), new RegExp(marker));
+  assert.doesNotMatch(state, new RegExp(marker));
+  assert.match(state, /Bash: failed/);
+
+  const jev = stubJev(() => 'fail');
+  const router = lowTask(jev);
+  const task = await router.routeTask(prompt, null);
+  await router.routeStep(step(batch, task.effort, { prompt, profile: task.profile! }));
+  assert.equal(jev.calls.length, 2);
+  assert.ok(jev.calls.every((sent) => !sent.includes(marker)), 'the unresolved-issue label is also withheld');
+});
+
+test('full evaluator content requires an explicit opt-in', () => {
+  const previous = process.env.JEV_OPUS_EVALUATOR_CONTENT;
+  process.env.JEV_OPUS_EVALUATOR_CONTENT = 'full';
+  try {
+    assert.match(taskState('Fix PRIVATE_EXAMPLE_TOKEN'), /PRIVATE_EXAMPLE_TOKEN/);
+    assert.match(stepState(step([fail('npm test', 'PRIVATE_EXAMPLE_TOKEN')], 'medium')), /PRIVATE_EXAMPLE_TOKEN/);
+  } finally {
+    if (previous === undefined) delete process.env.JEV_OPUS_EVALUATOR_CONTENT;
+    else process.env.JEV_OPUS_EVALUATOR_CONTENT = previous;
+  }
+});
 
 /* ---------- reducer ---------- */
 
@@ -307,6 +340,20 @@ test('invalid signals keep the local estimate; present answers on old clients co
   const t2 = await r2.routeTask('hi', null);
   assert.equal(t2.effort, 'max', 'a present answer on an old client counts as valid');
   assert.equal(t2.source, 'jev');
+});
+
+test('weak task type and difficulty answers cannot replace stronger local evidence', async () => {
+  const prompt = 'Fix a production security race condition in the authentication database';
+  const local = await lowTask().routeTask(prompt, null);
+  const weak = stubJev(() => ({
+    answers: { task_type: choice('chat', 0.2), difficulty: score(0.1, 0.2) },
+    signals: { task_type: 'valid', difficulty: 'valid', stakes: 'missing' },
+  }));
+  const routed = await lowTask(weak).routeTask(prompt, null);
+  assert.equal(routed.effort, local.effort);
+  assert.equal(routed.source, 'heuristic');
+  assert.equal(routed.profile?.taskType, local.profile?.taskType);
+  assert.equal(routed.profile?.difficulty, local.profile?.difficulty);
 });
 
 test('missing Jev evidence cannot itself cause a downgrade', async () => {

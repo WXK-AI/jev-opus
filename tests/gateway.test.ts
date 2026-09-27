@@ -2,9 +2,62 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
-import { JevGateway } from '../src/gateway/server.ts';
+import { GATEWAY_AUTH_HEADER, JevGateway } from '../src/gateway/server.ts';
+import { gatewayClientEnv } from '../src/gateway/launch.ts';
 import { addBeta, applyInsertions, effortInForce, lastToolRound, prefixHashes, userText, type Message } from '../src/gateway/transcript.ts';
 import { neutralAnswers, parseAnswers, type JevLike, type JevQuestion, type JevResult } from '../src/jev/client.ts';
+
+const TEST_AUTH_TOKEN = 'test-gateway-token';
+const testGateway = (opts: ConstructorParameters<typeof JevGateway>[0]) => new JevGateway({ ...opts, authToken: TEST_AUTH_TOKEN });
+
+test('Claude Code gateway environment carries the local token as a custom header', () => {
+  const env = gatewayClientEnv('http://127.0.0.1:47821', TEST_AUTH_TOKEN);
+  assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:47821');
+  assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, `${GATEWAY_AUTH_HEADER}: ${TEST_AUTH_TOKEN}`);
+});
+
+test('each gateway gets a strong token and rejects weak overrides', () => {
+  const opts = { jev: null, bounds: { min: 'low' as const, max: 'high' as const } };
+  const first = new JevGateway(opts);
+  const second = new JevGateway(opts);
+  assert.match(first.authToken, /^[0-9a-f]{64}$/);
+  assert.notEqual(first.authToken, second.authToken);
+  assert.throws(() => new JevGateway({ ...opts, authToken: 'short' }), /auth token/);
+});
+
+test('gateway reports an occupied port without crashing the process', async () => {
+  const occupied = await fakeUpstream();
+  const port = Number(new URL(occupied.url).port);
+  const gw = testGateway({ jev: null, bounds: { min: 'low', max: 'high' }, port });
+  try {
+    await assert.rejects(gw.listen(), /gateway could not listen.*EADDRINUSE/);
+  } finally { occupied.close(); }
+});
+
+test('an interrupted pass-through response does not crash the gateway', async () => {
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('event: message_start\ndata: {}\n\n');
+    setTimeout(() => res.destroy(), 10);
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  const address = upstream.address() as AddressInfo;
+  const gw = testGateway({ jev: null, bounds: { min: 'low', max: 'high' }, upstream: `http://127.0.0.1:${address.port}` });
+  const base = await gw.listen();
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(`${base}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN },
+        body: JSON.stringify({ model: 'claude-opus-5-5', messages: [u('hello')] }),
+      });
+      await assert.rejects(response.text());
+    }
+  } finally {
+    await gw.close();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
+});
 
 function scriptedJev(script: Array<Record<string, unknown>>): JevLike & { calls: number } {
   const jev = {
@@ -46,7 +99,7 @@ async function fakeUpstream(): Promise<{ url: string; seen: Seen[]; close: () =>
 async function post(base: string, body: unknown, headers: Record<string, string> = {}): Promise<string> {
   const res = await fetch(`${base}/v1/messages`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'anthropic-beta': 'oauth-2025-04-20,interleaved-thinking-2025-05-14', 'x-claude-code-session-id': 'sess-1', authorization: 'Bearer secret', ...headers },
+    headers: { 'content-type': 'application/json', 'anthropic-beta': 'oauth-2025-04-20,interleaved-thinking-2025-05-14', 'x-claude-code-session-id': 'sess-1', authorization: 'Bearer secret', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN, ...headers },
     body: JSON.stringify(body),
   });
   return res.text();
@@ -75,6 +128,47 @@ test('transcript helpers', () => {
   assert.equal(effortInForce(msgs, undefined), 'medium');
 });
 
+test('gateway rejects unauthenticated requests before evaluator or upstream work', async () => {
+  const up = await fakeUpstream();
+  const jev = scriptedJev([]);
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
+  const base = await gw.listen();
+  const request = { model: 'jev/claude-opus-5-5', tools, messages: [u('fix a test')] };
+  try {
+    const unauthorizedHeaders: Array<Record<string, string>> = [{}, { [GATEWAY_AUTH_HEADER]: 'wrong-token' }];
+    for (const headers of unauthorizedHeaders) {
+      const res = await fetch(`${base}/v1/messages`, { method: 'POST', headers, body: JSON.stringify(request) });
+      assert.equal(res.status, 401);
+      await res.text();
+    }
+    assert.equal(jev.calls, 0);
+    assert.equal(up.seen.length, 0);
+    await post(base, request);
+    assert.equal(jev.calls, 1);
+    assert.equal(up.seen.length, 1);
+  } finally {
+    await gw.close();
+    up.close();
+  }
+});
+
+test('gateway caps request bodies before forwarding', async () => {
+  const up = await fakeUpstream();
+  const gw = testGateway({ jev: null, bounds: { min: 'low', max: 'high' }, upstream: up.url, maxRequestBytes: 64 });
+  const base = await gw.listen();
+  try {
+    const res = await fetch(`${base}/v1/messages`, {
+      method: 'POST', headers: { [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN, 'content-type': 'text/plain' }, body: 'x'.repeat(65),
+    });
+    assert.equal(res.status, 413);
+    await res.text();
+    assert.equal(up.seen.length, 0);
+  } finally {
+    await gw.close();
+    up.close();
+  }
+});
+
 test('gateway: routes jev model, replays insertions byte-identically, passes secrets through', async () => {
   const up = await fakeUpstream();
   const jev = scriptedJev([
@@ -83,7 +177,7 @@ test('gateway: routes jev model, replays insertions byte-identically, passes sec
     { phase: { choice: 'verifying', confidence: 0.9 }, step_difficulty: { score: 1 }, stuck: { noul: 0.1 } }, // hold high
     { phase: { choice: 'exploring', confidence: 0.9 }, step_difficulty: { score: 0.5 }, stuck: { noul: 0.1 } }, // rewound step → low
   ]);
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
   const base = await gw.listen();
   try {
     const body = (messages: Message[]) => ({ model: 'jev/claude-opus-5-5', stream: true, tools, output_config: { effort: 'low' }, messages });
@@ -93,6 +187,7 @@ test('gateway: routes jev model, replays insertions byte-identically, passes sec
     let s = up.seen.at(-1)!;
     assert.equal(s.body!.model, 'claude-opus-5-5', 'jev/ prefix stripped');
     assert.equal(s.headers.authorization, 'Bearer secret', 'credential forwarded unchanged');
+    assert.equal(s.headers[GATEWAY_AUTH_HEADER], undefined, 'gateway token stays local');
     assert.match(String(s.headers['anthropic-beta']), /oauth-2025-04-20.*mid-conversation-output-config-2026-07-01/);
     const sent1 = s.body!.messages as Message[];
     assert.deepEqual(sent1[0], { role: 'system', content: [], output_config: { effort: 'medium' } }, 'task effort inserted before the prompt');
@@ -135,7 +230,7 @@ test('gateway: routes jev model, replays insertions byte-identically, passes sec
 test('gateway: other models, side requests without tools, and /v1/models', async () => {
   const up = await fakeUpstream();
   const jev = scriptedJev([]);
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
   const base = await gw.listen();
   try {
     const plain = { model: 'claude-opus-5-5', tools, messages: [u('hi')] };
@@ -149,7 +244,7 @@ test('gateway: other models, side requests without tools, and /v1/models', async
     assert.equal((side.messages as Message[]).length, 1, 'no routing for tool-less side requests');
     assert.equal(jev.calls, 0);
 
-    const models = (await (await fetch(`${base}/v1/models?limit=1000`)).json()) as { data: Array<{ id: string }> };
+    const models = (await (await fetch(`${base}/v1/models?limit=1000`, { headers: { [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN } })).json()) as { data: Array<{ id: string }> };
     assert.deepEqual(models.data.map((m) => m.id), ['jev/claude-opus-5-5', 'claude-opus-5-5']);
   } finally {
     await gw.close();
@@ -163,7 +258,7 @@ test('gateway: real Claude Code shape: trailing per-turn statement, re-serialize
     { task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } }, // low
     { phase: { choice: 'diagnosing', confidence: 0.9 }, step_difficulty: { score: 3.5 }, stuck: { noul: 0.1 } }, // high
   ]);
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
   const base = await gw.listen();
   try {
     const body = (messages: Message[]) => ({ model: 'jev/claude-opus-5-5', tools, output_config: { effort: 'medium' }, messages });
@@ -195,7 +290,7 @@ test('gateway: a changed client effort (the user ran /effort) pauses routing unt
   const jev = scriptedJev([
     { task_type: { choice: 'code_small', confidence: 0.9 }, difficulty: { score: 0.2 }, stakes: { noul: 0.1 } }, // low
   ]);
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
   const base = await gw.listen();
   try {
     const body = (messages: Message[]) => ({ model: 'jev/claude-opus-5-5', tools, messages });
@@ -221,7 +316,7 @@ test('gateway: inline display hooks stay local, preserve the model transcript, a
     { task_type: { choice: 'code_small', confidence: .9 }, difficulty: { score: .2 }, stakes: { noul: .1 } },
     { phase: { choice: 'diagnosing', confidence: .9 }, step_difficulty: { score: 3.5 }, stuck: { noul: .1 } },
   ]);
-  const gw = new JevGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url });
   const base = await gw.listen();
   const hook = async (input: unknown) => (await fetch(base + gw.displayHookPath, { method: 'POST', body: JSON.stringify(input) })).json();
   try {

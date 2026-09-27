@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -48,6 +48,10 @@ export interface GatewayOptions {
   onNotice?: (message: string) => void;
   trace?: (event: Record<string, unknown>) => void;
   maxThreads?: number;
+  /** Optional fixed token for an embedding host; generated per gateway otherwise. */
+  authToken?: string;
+  /** Maximum proxied request size; defaults to 64 MiB. */
+  maxRequestBytes?: number;
 }
 
 interface Thread {
@@ -103,27 +107,36 @@ const HOP_BY_HOP = new Set(['host', 'connection', 'content-length', 'accept-enco
 const DROP_RESPONSE = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive']);
 const POLICY_VERSION = `gateway.v1+${TASK_SET_VERSION}+${STEP_SET_VERSION}`;
 const PREPARED_CAP = 512;
+export const GATEWAY_AUTH_HEADER = 'x-jev-gateway-token';
+const DEFAULT_MAX_REQUEST_BYTES = 64 * 1024 * 1024;
 
 export class JevGateway {
   /** Ephemeral local endpoint; hook payloads are never forwarded upstream. */
   readonly displayHookPath = `/_jev/hooks/${randomUUID()}`;
+  readonly authToken: string;
   private readonly display: EffortDisplay;
   private auditDegraded = false;
   private readonly auditWarned = new Set<string>();
   private readonly opts: GatewayOptions;
   private readonly upstream: string;
+  private readonly maxRequestBytes: number;
   private readonly journal: Journal | null;
   private readonly threads = new Map<string, Thread>();
   private server: http.Server | null = null;
 
   constructor(opts: GatewayOptions) {
     this.opts = opts;
+    this.authToken = opts.authToken ?? randomBytes(32).toString('hex');
+    if (!/^[A-Za-z0-9._~-]{16,}$/.test(this.authToken)) throw new Error('gateway auth token must contain at least 16 header-safe characters');
+    this.maxRequestBytes = opts.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
+    if (!Number.isSafeInteger(this.maxRequestBytes) || this.maxRequestBytes < 1) throw new Error('maxRequestBytes must be a positive safe integer');
     this.display = new EffortDisplay(256, displayMode(), (key, event) => this.journalAppend(key, event));
     this.upstream = (opts.upstream ?? 'https://api.anthropic.com').replace(/\/+$/, '');
     this.journal = opts.journalDir ? new Journal(opts.journalDir) : null;
   }
 
   async listen(): Promise<string> {
+    if (this.server) throw new Error('gateway is already listening');
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
         this.opts.onNotice?.(`gateway error: ${(err as Error).message}`);
@@ -131,7 +144,20 @@ export class JevGateway {
         res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `jev gateway: ${(err as Error).message}` } }));
       });
     });
-    await new Promise<void>((resolve) => this.server!.listen(this.opts.port ?? 0, this.opts.host ?? '127.0.0.1', resolve));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const server = this.server!;
+        const failed = (err: Error) => reject(err);
+        server.once('error', failed);
+        server.listen(this.opts.port ?? 0, this.opts.host ?? '127.0.0.1', () => {
+          server.off('error', failed);
+          resolve();
+        });
+      });
+    } catch (err) {
+      this.server = null;
+      throw new Error(`gateway could not listen on ${this.opts.host ?? '127.0.0.1'}:${this.opts.port ?? 0}: ${(err as Error).message}`, { cause: err });
+    }
     const a = this.server.address() as AddressInfo;
     return `http://${a.address}:${a.port}`;
   }
@@ -165,12 +191,25 @@ export class JevGateway {
       res.end(JSON.stringify(output));
       return;
     }
+    const suppliedToken = req.headers[GATEWAY_AUTH_HEADER];
+    const actual = typeof suppliedToken === 'string' ? Buffer.from(suppliedToken) : Buffer.alloc(0);
+    const expected = Buffer.from(this.authToken);
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+      res.writeHead(401, { 'content-type': 'application/json', connection: 'close' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'jev gateway token required' } }));
+      return;
+    }
     const chunks: Buffer[] = [];
-    for await (const c of req) chunks.push(c as Buffer);
+    let size = 0;
+    for await (const c of req) {
+      size += (c as Buffer).length;
+      if (size > this.maxRequestBytes) { res.writeHead(413).end(); return; }
+      chunks.push(c as Buffer);
+    }
     let body: Buffer | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers)) {
-      if (v === undefined || HOP_BY_HOP.has(k)) continue;
+      if (v === undefined || HOP_BY_HOP.has(k) || k === GATEWAY_AUTH_HEADER) continue;
       headers[k] = Array.isArray(v) ? v.join(', ') : v;
     }
     const url = req.url ?? '/';
@@ -251,6 +290,9 @@ export class JevGateway {
     }
     const stream = Readable.fromWeb(up.body as import('node:stream/web').ReadableStream);
     if (telem) this.attachTelemetry(stream, telem, up, res, controller);
+    // Pass-through responses need an error listener too. Otherwise an
+    // upstream body failure becomes an uncaught exception in the gateway.
+    stream.on('error', () => res.destroy());
     stream.pipe(res);
   }
 
@@ -277,7 +319,7 @@ export class JevGateway {
     };
     stream.on('data', (chunk: Buffer) => parser.push(chunk));
     stream.on('end', () => finish(true));
-    stream.on('error', () => { finish(false); res.destroy(); });
+    stream.on('error', () => finish(false));
     res.on('close', () => finish(false));
   }
 

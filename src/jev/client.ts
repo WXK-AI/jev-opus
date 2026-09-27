@@ -20,8 +20,10 @@ export type JevQuestion =
 
 export type JevAnswer =
   | { kind: 'noul'; p: number }
-  | { kind: 'choice'; choice: string; confidence: number; probabilities: Record<string, number> }
-  | { kind: 'score'; score: number; confidence: number; probabilities: Record<string, number> };
+  // Some Jev responses omit confidence. Preserve that distinction from an
+  // explicit low-confidence answer while keeping the numeric legacy field.
+  | { kind: 'choice'; choice: string; confidence: number; confidenceMissing?: true; probabilities: Record<string, number> }
+  | { kind: 'score'; score: number; confidence: number; confidenceMissing?: true; probabilities: Record<string, number> };
 
 /** Per-question outcome of validating one Jev response. */
 export type JevSignal = 'valid' | 'missing' | 'invalid';
@@ -69,11 +71,11 @@ export function parseAnswers(raw: unknown, questions: Record<string, JevQuestion
     } else if (q.type === 'choice') {
       const keys = Object.keys(q.criteria);
       const choice = typeof a.choice === 'string' && keys.includes(a.choice) ? a.choice : keys[0] ?? '';
-      out[name] = { kind: 'choice', choice, confidence: clamp01(Number(a.confidence ?? 0)), probabilities };
+      out[name] = { kind: 'choice', choice, confidence: clamp01(Number(a.confidence ?? 0)), ...(a.confidence === undefined ? { confidenceMissing: true as const } : {}), probabilities };
     } else {
       const top = q.criteria.length - 1;
       const score = Math.min(top, Math.max(0, Number(a.score ?? top / 2)));
-      out[name] = { kind: 'score', score: Number.isFinite(score) ? score : top / 2, confidence: clamp01(Number(a.confidence ?? 0)), probabilities };
+      out[name] = { kind: 'score', score: Number.isFinite(score) ? score : top / 2, confidence: clamp01(Number(a.confidence ?? 0)), ...(a.confidence === undefined ? { confidenceMissing: true as const } : {}), probabilities };
     }
   }
   return out;
@@ -97,11 +99,11 @@ function validateAnswer(a: Record<string, unknown>, q: JevQuestion): JevAnswer |
   }
   if (q.type === 'choice') {
     if (typeof a.choice !== 'string' || !Object.hasOwn(q.criteria, a.choice)) return null;
-    return { kind: 'choice', choice: a.choice, confidence, probabilities };
+    return { kind: 'choice', choice: a.choice, confidence, ...(a.confidence === undefined ? { confidenceMissing: true as const } : {}), probabilities };
   }
   const top = q.criteria.length - 1;
   return typeof a.score === 'number' && Number.isFinite(a.score) && a.score >= 0 && a.score <= top
-    ? { kind: 'score', score: a.score, confidence, probabilities }
+    ? { kind: 'score', score: a.score, confidence, ...(a.confidence === undefined ? { confidenceMissing: true as const } : {}), probabilities }
     : null;
 }
 

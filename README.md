@@ -133,7 +133,7 @@ Start a long-running gateway, then point the surface at it:
 jev-opus gateway                # http://127.0.0.1:47821, prints the env to use; decisions logged to ~/.config/jev-opus/gateway.log
 ```
 
-The standalone gateway also prints the hook settings for inline badges. Merge those into the client's Claude Code settings while that gateway is running. Restarting the gateway generates a new hook URL; `jev-opus claude` wires this up automatically on each launch.
+The standalone gateway prints `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS` for Claude Code. Both are required: the custom header carries a random token that the gateway checks before accepting API traffic. Pass the printed `x-jev-gateway-token` header with direct HTTP clients, and treat the token as a temporary secret. The gateway also prints the hook settings for inline badges. Merge those into the client's Claude Code settings while that gateway is running. Restarting the gateway generates a new token and hook URL; `jev-opus claude` wires both up automatically on each launch.
 
 | Surface | How | Works with a claude.ai subscription? |
 | --- | --- | --- |
@@ -211,6 +211,8 @@ Inserted effort statements become part of the history the model has seen, so the
 - **Edited history:** a request whose earlier content changed is re-routed from the common ancestor.
 - **Privacy:** the journal holds hashes, effort levels and usage numbers, never prompts, tool output or credentials. Usage and stop reason are recorded separately for each request attempt. Decisions also carry routing reasons, source, policy versions, bounds, and evaluator timing.
 
+When Jev is enabled, it receives a summary made of fixed task cues, local difficulty estimates, tool names, and success or failure flags. Raw prompts, commands, assistant notes, and tool results stay out of evaluator requests by default. Set `JEV_OPUS_EVALUATOR_CONTENT=full` only if you explicitly want the older, more detailed routing context sent to the configured TypeSafe or OpenRouter endpoint. `--no-jev` keeps all routing local.
+
 **Accounting.** Driver-mode task costs are differences between Claude Code's cumulative session totals, subagents included. Per-call output tokens in driver mode are the SDK's streamed values and can undercount. Use task totals, or the gateway audit export for observed per-attempt usage. Missing final usage is marked incomplete; it is never silently treated as zero. Legacy journals lack exact retry attribution.
 
 ## Audit history
@@ -228,12 +230,12 @@ A response is completed only after protocol completion. In-stream errors are fai
 
 The prepared decision, which holds the statements the request needs, is flushed to disk before forwarding. If that write fails, the request is not sent. Later records (dispatch, completion, annotations) are telemetry: if they fail to write, a visible degraded-logging notice appears, and they never block a request.
 
-A partial last line, which a crash during a write can leave, is skipped when the journal is read. Corruption anywhere else stops replay for that conversation with an explicit error, rather than silently inventing replacement history. Keep the JSONL files intact when exporting or backing them up.
+A partial last line, which a crash during a write can leave, is skipped when the journal is read and removed before the next append. A complete JSON record missing only its newline is kept. Corruption anywhere else stops replay for that conversation with an explicit error, rather than silently inventing replacement history. Keep the JSONL files intact when exporting or backing them up.
 
 ## Credentials and isolation
 
-The Claude Code child process never inherits a parent session's `ANTHROPIC_*` / `CLAUDE_*` variables. That matters when jev-opus is launched from inside Claude Code: without this, it would reuse the parent's token and its pinned `CLAUDE_CODE_EFFORT_LEVEL`. The child gets only:
-- a `JEV_OPUS_ANTHROPIC_API_KEY` / `JEV_OPUS_CLAUDE_OAUTH_TOKEN` variable, or
+The Claude Code child process never inherits a parent session's `ANTHROPIC_*` / `CLAUDE_*` variables or the Jev/OpenRouter API keys. That matters when jev-opus is launched from inside Claude Code: without this, it would reuse the parent's token and its pinned `CLAUDE_CODE_EFFORT_LEVEL`. The Claude credential passed to the child is sourced from:
+- a `JEV_OPUS_ANTHROPIC_API_KEY` / `JEV_OPUS_CLAUDE_OAUTH_TOKEN` setting (passed under Claude's standard credential name), or
 - an `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` written in a jev-opus `.env` file, or
 - your `claude` login.
 
@@ -265,6 +267,29 @@ npm test                    # offline tests, including a scripted fake Claude Co
 npm run typecheck && npm run build
 npm run validate:plugin     # needs the claude CLI
 ```
+
+### Compare effort modes
+
+`evals/run.ts` runs each task in a fresh Git worktree at a pinned commit. It compares fixed `medium`, fixed `high`, local adaptive routing (`heuristic`), and Jev routing (`jev`), then runs the same independent verification commands for each result. Each trial records task success, total agent and evaluator cost, and elapsed time in JSONL. It makes paid Claude calls, and `jev` needs a configured Jev key.
+
+Create a manifest with representative tasks. For a credible quality comparison, make `verify` call acceptance tests kept outside the target worktree, so the agent cannot change their expected results. A repository's own `npm test` is useful for a smoke check but is not sufficient on its own:
+
+```json
+{
+  "trials": 3,
+  "maxTurns": 20,
+  "tasks": [{
+    "id": "date-parser-regression",
+    "repository": "/absolute/path/to/date-library",
+    "ref": "the-same-base-commit-for-every-mode",
+    "prompt": "Fix the date parser regression described in issue 123",
+    "setup": ["npm ci"],
+    "verify": ["/absolute/path/to/independent-checks.sh"]
+  }]
+}
+```
+
+Check the task count and pinned commits with `node evals/run.ts manifest.json results.jsonl --dry-run`, then run `node evals/run.ts manifest.json results.jsonl`. The runner rotates mode order across trials and writes results after every run. Failed or missing usage is counted as incomplete coverage, not zero cost. Review the individual records as well as the summary; a small sample is useful for finding failures, not for proving a savings rate.
 
 Releasing:
 1. Bump `version` in `package.json` and `plugin/.claude-plugin/plugin.json`, run `npm run build`, then commit and push.

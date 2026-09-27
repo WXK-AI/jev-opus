@@ -29,11 +29,13 @@ export type JevAnswer = {
     kind: 'choice';
     choice: string;
     confidence: number;
+    confidenceMissing?: true;
     probabilities: Record<string, number>;
 } | {
     kind: 'score';
     score: number;
     confidence: number;
+    confidenceMissing?: true;
     probabilities: Record<string, number>;
 };
 /** Per-question outcome of validating one Jev response. */
