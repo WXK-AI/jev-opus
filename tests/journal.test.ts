@@ -212,6 +212,114 @@ test('changed history at the same boundary is a new decision routed from the com
   }
 });
 
+test('returning to an older branch restores the effort statements that branch already saw', async () => {
+  const up = await fakeUpstream();
+  const dir = tmpdir();
+  const gw = testGateway({ jev: null, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const base = await gw.listen();
+  try {
+    const first = [u('fix the bug')];
+    await post(base, body(first));
+    const branchA = [...first, a('t1', 'npm test'), r('t1', 'FAIL assertion', true)];
+    await post(base, body(branchA));
+    const sentA = up.seen.at(-1)!.body!.messages as Message[];
+    assert.equal(sentA[3]!.output_config?.effort, 'high');
+
+    const branchB = [...first, a('t2', 'ls'), r('t2', 'index.ts')];
+    await post(base, body(branchB));
+    await post(base, body([...branchA, a('t3', 'cat index.ts'), r('t3', 'source')]));
+    const continuedA = up.seen.at(-1)!.body!.messages as Message[];
+    assert.deepEqual(continuedA.slice(0, sentA.length), sentA,
+      'a sibling branch must not erase an effort statement already sent on this branch');
+  } finally {
+    await gw.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a client disconnect during evaluation prevents upstream dispatch', async () => {
+  const up = await fakeUpstream();
+  let entered!: () => void;
+  let release!: () => void;
+  const evaluating = new Promise<void>((resolve) => (entered = resolve));
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const jev: JevLike = {
+    enabled: true,
+    async ask(_state, questions) {
+      entered();
+      await gate;
+      return { answers: parseAnswers({ task_type: { choice: 'debugging', confidence: 0.9 }, difficulty: { score: 2.5 }, stakes: { noul: 0.1 } }, questions), failed: false, latencyMs: 1, inputTokens: 1 };
+    },
+  };
+  const dir = tmpdir();
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const base = await gw.listen();
+  try {
+    const messages = [u('fix the bug')];
+    const controller = new AbortController();
+    const request = fetch(`${base}/v1/messages`, {
+      method: 'POST', signal: controller.signal,
+      headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN },
+      body: JSON.stringify(body(messages)),
+    });
+    await evaluating;
+    controller.abort();
+    await assert.rejects(request, { name: 'AbortError' });
+    // Let the aborted socket's close event reach the gateway before Jev answers.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    release();
+    assert.equal(await until(() => new Journal(dir).records(journalKey('sess-1', messages)).length === 1), true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(up.seen.length, 0, 'a completed decision must not dispatch after its client disconnects');
+  } finally {
+    release();
+    await gw.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an active decision survives thread cache eviction and keeps duplicate requests single-flight', async () => {
+  const up = await fakeUpstream();
+  let entered!: () => void;
+  let release!: () => void;
+  const evaluating = new Promise<void>((resolve) => (entered = resolve));
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let calls = 0;
+  const jev: JevLike = {
+    enabled: true,
+    async ask(_state, questions) {
+      const n = ++calls;
+      if (n === 1) { entered(); await gate; }
+      return { answers: parseAnswers({ task_type: { choice: 'debugging', confidence: 0.9 }, difficulty: { score: n === 1 ? 3.5 : 1 }, stakes: { noul: 0.1 } }, questions), failed: false, latencyMs: 1, inputTokens: 1 };
+    },
+  };
+  const dir = tmpdir();
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, maxThreads: 1 });
+  const base = await gw.listen();
+  try {
+    const request = body([u('fix the bug')]);
+    const first = post(base, request, { 'x-claude-code-session-id': 'sess-A' });
+    await evaluating;
+    await post(base, body([u('another task')]), { 'x-claude-code-session-id': 'sess-B' });
+    const duplicate = post(base, request, { 'x-claude-code-session-id': 'sess-A' });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(calls, 2, 'the duplicate joins the active decision, even when another thread fills the cache');
+    release();
+    await Promise.all([first, duplicate]);
+    const sentA = up.seen.filter((seen) => (seen.body?.messages as Message[]).some((m) =>
+      m.role === 'user' && Array.isArray(m.content) && m.content.some((b: { text?: string }) => b.text === 'fix the bug')));
+    assert.equal(sentA.length, 2);
+    assert.deepEqual(sentA[0]!.body!.messages, sentA[1]!.body!.messages);
+  } finally {
+    release();
+    await gw.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('thread eviction rebuilds from the journal: maxThreads 1 keeps the original insertion', async () => {
   const up = await fakeUpstream();
   const jev = scriptedJev([

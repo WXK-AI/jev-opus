@@ -109,6 +109,26 @@ function fakeClaude(steps: Step[], opts: FakeClaudeOpts = {}) {
   return { fn, applied, efforts, get startEffort() { return startEffort; } };
 }
 
+test('simultaneous send calls reject the second prompt before routing begins', async () => {
+  const claude = fakeClaude([]);
+  const session = new JevOpusSession({
+    router: new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } }),
+    cwd: '/w', model: 'claude-opus-5-5', env: {}, permissionMode: 'acceptEdits', settingSources: [], queryFn: claude.fn,
+  });
+  try {
+    const first = session.send('first');
+    const second = session.send('second').then(
+      () => 'accepted',
+      (err: Error) => err.message,
+    );
+    const outcome = await Promise.race([second, new Promise<string>((resolve) => setTimeout(() => resolve('timed out'), 500))]);
+    assert.equal(outcome, 'a prompt is already running');
+    assert.equal((await first).result, 'All done.');
+  } finally {
+    await session.close();
+  }
+});
+
 test('Jev changes effort mid-prompt: failing test → high, hold, finishing → low', async () => {
   // Selective Jev: while the failing test is unresolved the Edit step is decided
   // locally, so the script only needs entries for the task, the failure, and

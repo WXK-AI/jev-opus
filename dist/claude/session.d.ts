@@ -98,6 +98,7 @@ export declare class JevOpusSession {
     /** latest effort confirmed pushed to Claude Code (start option or resolved applyFlagSettings) */
     private appliedEffort;
     private task;
+    private sending;
     private toolNames;
     private lastResult;
     private ended;

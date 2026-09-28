@@ -74,6 +74,9 @@ export class JevGateway {
         await new Promise((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
     }
     async handle(req, res) {
+        const controller = new AbortController();
+        res.on('close', () => { if (!res.writableFinished)
+            controller.abort(); });
         if ((req.url ?? '').startsWith('/_jev/')) {
             if (req.method !== 'POST' || req.url !== this.displayHookPath) {
                 res.writeHead(404).end();
@@ -168,15 +171,15 @@ export class JevGateway {
                 this.display.clear(headers['x-claude-code-session-id'] ?? 'no-session', headers['x-claude-code-agent-id'] ?? 'main');
             }
         }
+        // The client may have gone away while the evaluator was preparing this request.
+        if (controller.signal.aborted || res.destroyed)
+            return;
         // The request is on its way: mark the prepared decision as sent before dispatch.
         if (telem) {
             // Telemetry, not recovery: the prepared record was already persisted (required) in decide().
             this.journalAppend(telem.key, { decisionId: telem.decisionId, attemptId: telem.attemptId, status: 'sent', at: Date.now() });
             this.display.record(telem.session, telem.agent, telem.decision, telem);
         }
-        const controller = new AbortController();
-        res.on('close', () => { if (!res.writableFinished)
-            controller.abort(); });
         let up;
         try {
             up = await fetch(this.upstream + url, {
@@ -257,32 +260,40 @@ export class JevGateway {
         const hashes = prefixHashes(messages);
         const key = `${session}|${agent}|${hashes[1]?.slice(0, 16) ?? 'empty'}`;
         const t = this.thread(key, messages, hashes);
-        const lastUser = lastIndexOfRole(messages, 'user');
-        if (lastUser < 0)
-            return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
-        // Claude Code forks the conversation for side queries such as the next-prompt
-        // suggestion. Replay our statements so the fork shares the cache, but don't
-        // route it: it isn't a user prompt, and it must not move the status line.
-        if (isSideQuery(messages[lastUser]))
-            return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
-        const fp = requestFingerprint(hashes[lastUser + 1], body);
-        const hit = t.prepared.get(fp);
-        if (hit)
-            return this.replay(await hit, key, messages, hashes);
-        const prepared = t.queue.then(() => this.decide(t, key, fp, lastUser, messages, hashes, body, session, agent));
-        t.queue = prepared.then(() => undefined, () => undefined);
-        t.prepared.set(fp, prepared);
-        void prepared.catch(() => {
-            if (t.prepared.get(fp) === prepared)
-                t.prepared.delete(fp);
-        });
-        while (t.prepared.size > PREPARED_CAP) {
-            const oldest = t.prepared.keys().next().value;
-            if (oldest === undefined || oldest === fp)
-                break;
-            t.prepared.delete(oldest);
+        t.active++;
+        this.trimThreads();
+        try {
+            const lastUser = lastIndexOfRole(messages, 'user');
+            if (lastUser < 0)
+                return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
+            // Claude Code forks the conversation for side queries such as the next-prompt
+            // suggestion. Replay our statements so the fork shares the cache, but don't
+            // route it: it isn't a user prompt, and it must not move the status line.
+            if (isSideQuery(messages[lastUser]))
+                return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
+            const fp = requestFingerprint(hashes[lastUser + 1], body);
+            const hit = t.prepared.get(fp);
+            if (hit)
+                return this.replay(await hit, key, messages, hashes);
+            const prepared = t.queue.then(() => this.decide(t, key, fp, lastUser, messages, hashes, body, session, agent));
+            t.queue = prepared.then(() => undefined, () => undefined);
+            t.prepared.set(fp, prepared);
+            void prepared.catch(() => {
+                if (t.prepared.get(fp) === prepared)
+                    t.prepared.delete(fp);
+            });
+            while (t.prepared.size > PREPARED_CAP) {
+                const oldest = t.prepared.keys().next().value;
+                if (oldest === undefined || oldest === fp)
+                    break;
+                t.prepared.delete(oldest);
+            }
+            return this.replay(await prepared, key, messages, hashes);
         }
-        return this.replay(await prepared, key, messages, hashes);
+        finally {
+            t.active--;
+            this.trimThreads();
+        }
     }
     /** Apply a prepared transformation to a request's messages (retry-safe). */
     replay(p, key, messages, hashes) {
@@ -399,6 +410,9 @@ export class JevGateway {
             t.router.restore(tip.routerSnapshot);
         else
             t.router = new EffortRouter({ jev: this.opts.jev, bounds: this.opts.bounds });
+        // The live insertion list can belong to a sibling branch. Restore the
+        // ancestor's exact list before deciding the next boundary on this branch.
+        t.insertions = tip ? validInsertions(tip.insertions, messages, hashes) : [];
         t.trajectory = [];
         if (tip) {
             // Replay the surviving branch's step records to rebuild the trajectory
@@ -457,7 +471,7 @@ export class JevGateway {
             router: new EffortRouter({ jev: this.opts.jev, bounds: this.opts.bounds }),
             insertions: [], decidedAt: 0, prompt: '', profile: null, turn: 0, consecutiveFailures: 0, trajectory: [],
             manual: false, effort: null, clientEffort: null,
-            queue: Promise.resolve(), prepared: new Map(), records: [], tip: null,
+            queue: Promise.resolve(), prepared: new Map(), records: [], tip: null, active: 0,
         };
         // A cache miss (eviction or restart) rebuilds the thread from the durable
         // journal, so a continued conversation replays the statements sent before.
@@ -479,10 +493,16 @@ export class JevGateway {
             }
         }
         this.threads.set(key, t);
-        const max = this.opts.maxThreads ?? 256;
-        while (this.threads.size > max)
-            this.threads.delete(this.threads.keys().next().value);
         return t;
+    }
+    trimThreads() {
+        const max = this.opts.maxThreads ?? 256;
+        while (this.threads.size > max) {
+            const oldest = [...this.threads].find(([, thread]) => thread.active === 0)?.[0];
+            if (oldest === undefined)
+                break;
+            this.threads.delete(oldest);
+        }
     }
     /** effort path of the current prompt per session, shown live in the status line */
     trails = new Map();

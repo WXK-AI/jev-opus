@@ -153,6 +153,7 @@ export class JevOpusSession {
   /** latest effort confirmed pushed to Claude Code (start option or resolved applyFlagSettings) */
   private appliedEffort: Effort | null = null;
   private task: TaskState | null = null;
+  private sending = false;
   private toolNames = new Map<string, string>();
   private lastResult = '';
   private ended: Error | null = null;
@@ -173,39 +174,43 @@ export class JevOpusSession {
   /** Route the prompt with Jev, set effort, run it to completion. */
   async send(prompt: string): Promise<TaskReport> {
     if (this.ended) throw this.ended;
-    if (this.task) throw new Error('a prompt is already running');
-    const { router, observer } = this.opts;
+    if (this.task || this.sending) throw new Error('a prompt is already running');
+    this.sending = true;
+    try {
+      const { router, observer } = this.opts;
+      const decision = await router.routeTask(prompt, this.effort, this.lastResult || undefined);
+      observer?.onDecision?.(decision);
+      this.opts.trace?.({ event: 'decision', ...decision });
 
-    const decision = await router.routeTask(prompt, this.effort, this.lastResult || undefined);
-    observer?.onDecision?.(decision);
-    this.opts.trace?.({ event: 'decision', ...decision });
+      this.effort = decision.effort;
+      if (!this.q) this.start(decision.effort);
+      else if (decision.effort !== this.appliedEffort) {
+        await this.q.applyFlagSettings({ effortLevel: decision.effort });
+        this.appliedEffort = decision.effort;
+      }
 
-    this.effort = decision.effort;
-    if (!this.q) this.start(decision.effort);
-    else if (decision.effort !== this.appliedEffort) {
-      await this.q.applyFlagSettings({ effortLevel: decision.effort });
-      this.appliedEffort = decision.effort;
+      const done = new Promise<TaskReport>((resolve, reject) => {
+        this.task = {
+          prompt,
+          profile: decision.profile ?? router.lastProfileFallback(prompt),
+          turn: 0,
+          consecutiveFailures: 0,
+          assistantNote: '',
+          trajectory: [],
+          failures: new Map(),
+          decisions: [decision],
+          calls: new Map(),
+          lastCall: null,
+          observedEfforts: [],
+          resolve,
+          reject,
+        };
+      });
+      this.input.push({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: prompt } });
+      return await done;
+    } finally {
+      this.sending = false;
     }
-
-    const done = new Promise<TaskReport>((resolve, reject) => {
-      this.task = {
-        prompt,
-        profile: decision.profile ?? router.lastProfileFallback(prompt),
-        turn: 0,
-        consecutiveFailures: 0,
-        assistantNote: '',
-        trajectory: [],
-        failures: new Map(),
-        decisions: [decision],
-        calls: new Map(),
-        lastCall: null,
-        observedEfforts: [],
-        resolve,
-        reject,
-      };
-    });
-    this.input.push({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: prompt } });
-    return done;
   }
 
   /** Pin/unpin effort mid-session (REPL /pin, /auto). Applies immediately. */

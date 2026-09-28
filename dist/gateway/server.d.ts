@@ -80,6 +80,7 @@ export declare class JevGateway {
     private publishDecision;
     private journalAppend;
     private thread;
+    private trimThreads;
     /** effort path of the current prompt per session, shown live in the status line */
     private readonly trails;
     private writeStatus;
