@@ -29,6 +29,8 @@ interface Scan {
     strong: number;
     /** lines naming an environment blocker (kept as evidence for classification) */
     environment: string[];
+    /** the output shows more ran than the check behind the last summary: a script started after it, or a runner reported failing */
+    uncovered: boolean;
 }
 export declare function scanOutput(text: string): Scan;
 /** Simple commands of a shell script (see parsePipelines). */

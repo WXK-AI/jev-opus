@@ -45,7 +45,9 @@ export function stringifyResult(response: unknown): string {
 // check, where it can reveal a failure a pipeline masked (`npm test | tail`).
 // Attribution rules, since one output mixes every command's text:
 // - a check's zero-failure summary (`# fail 0`) is the verdict of one check
-//   only: it clears other failure text only when the command runs one check;
+//   only: it clears other failure text only when the command runs one check
+//   and the output shows nothing else ran — no script started after the
+//   summary (a `posttest` hook) and no script runner reported failing;
 // - when the command also prints stored content (a file, a diff), failure
 //   markers cannot be told apart from what was read: they are suspect. A
 //   failing summary line (`# fail 2`, `FAILED (failures=1)`) is a runner's
@@ -91,8 +93,9 @@ export function classifyToolResult(tool: string, input: unknown, text: string, i
   const passingSummary = scan.summaries && !scan.failures.length;
   const suspect: ToolOutcome = { failed: false, suspect: true, cause: 'output-text', kind, evidence: evidenceText(lines) };
   if (kind === 'other') return passingSummary ? passed : suspect;
-  // The only check's own passing summary outranks failure words elsewhere.
-  if (passingSummary && shape!.checks === 1) return passed;
+  // The only check's own passing summary outranks failure words elsewhere,
+  // unless the output shows the command ran more than that check.
+  if (passingSummary && shape!.checks === 1 && !scan.uncovered) return passed;
   if (shape!.readsContent && (shape!.readsLogs || !scan.failures.length)) return suspect;
   if (passingSummary && scan.strong === 0) return suspect;
   return { failed: true, suspect: false, cause: scan.failures.length ? 'check-summary' : 'check-output', kind, evidence: evidenceText(lines) };
@@ -164,7 +167,19 @@ const WEAK_MARKERS: readonly RegExp[] = [
   /^\s*(?:[A-Z]\w*)?Error(?: \[[A-Z_]+\])?: /,
   /^\s*\+ actual - expected\b/,
 ];
+/**
+ * Lines a script runner or the shell prints when the command around a check
+ * fails (a hook, a later step of the script): no check summary covers them.
+ */
+const RUNNER_FAILURES: readonly RegExp[] = [
+  /^npm (?:ERR!|error) |^ERR_PNPM_|^\s*ELIFECYCLE\b/,
+  /^error Command failed with exit code \d+|^error: script ".*" exited with code \d+/,
+  /^make(?:\[\d+\])?: \*\*\* /,
+  /^(?:\S*sh: )?(?:line \d+: )?[\w./-]+: command not found\s*$|^\S*sh: command not found: /,
+  /^Exit code [1-9]\d*/,
+];
 const STRONG_MARKERS: readonly RegExp[] = [
+  ...RUNNER_FAILURES,
   /^\s*not ok \d+/,
   /^\s*(?:FAIL|FAILED|ERROR)(?::|\s|$)(?!\s*[:=]?\s*0\b)/,
   /^\s*--- FAIL\b/,
@@ -172,11 +187,11 @@ const STRONG_MARKERS: readonly RegExp[] = [
   /^thread '.*' panicked at\b|^panic: /,
   /^error(?:\[E\d+\])?: /,
   /(?:^|\s)error TS\d+: /,
-  /^npm (?:ERR!|error) |^ERR_PNPM_|^\s*ELIFECYCLE\b/,
-  /^make(?:\[\d+\])?: \*\*\* /,
-  /^(?:\S*sh: )?(?:line \d+: )?[\w./-]+: command not found\s*$|^\S*sh: command not found: /,
-  /^Exit code [1-9]\d*/,
+  // `git diff --check`
+  /^\S.*:\d+: (?:(?:trailing whitespace|space before tab in indent|indent with non-tab characters|tab in indent)(?:, [a-z -]+)*\.|new blank line at EOF\.|leftover conflict marker)$/,
 ];
+/** A script runner starting a script: npm/pnpm's `> pkg@1.0.0 posttest`, yarn/bun's `$ node validate.js`. */
+const SCRIPT_START = /^> \S+ \S|^\$ \S/;
 
 function count(s: string, re: RegExp): number {
   const m = s.match(re);
@@ -194,11 +209,14 @@ interface Scan {
   strong: number;
   /** lines naming an environment blocker (kept as evidence for classification) */
   environment: string[];
+  /** the output shows more ran than the check behind the last summary: a script started after it, or a runner reported failing */
+  uncovered: boolean;
 }
 
 export function scanOutput(text: string): Scan {
   const sample = text.length <= SCAN_CHARS ? text : `${text.slice(0, SCAN_CHARS / 2)}\n${text.slice(-SCAN_CHARS / 2)}`;
-  const scan: Scan = { summaries: false, failures: [], markers: [], strong: 0, environment: [] };
+  const scan: Scan = { summaries: false, failures: [], markers: [], strong: 0, environment: [], uncovered: false };
+  let scriptAfterSummary = false, runnerFailed = false;
   for (const raw of sample.split('\n')) {
     const line = raw.replace(/\x1b\[[\d;]*m/g, '').trimEnd();
     if (!line) continue;
@@ -211,13 +229,17 @@ export function scanOutput(text: string): Scan {
       if (failures(m) > 0 && scan.failures.length < EVIDENCE_LINES) scan.failures.push(line);
       break;
     }
-    if (!summary) {
+    if (summary) scriptAfterSummary = false;
+    else {
+      if (scan.summaries && SCRIPT_START.test(line)) scriptAfterSummary = true;
+      if (RUNNER_FAILURES.some((re) => re.test(line))) runnerFailed = true;
       const strong = STRONG_MARKERS.some((re) => re.test(line));
       if (strong) scan.strong++;
       if ((strong || WEAK_MARKERS.some((re) => re.test(line))) && scan.markers.length < EVIDENCE_LINES) scan.markers.push(line);
     }
     if (scan.environment.length < EVIDENCE_LINES && ENVIRONMENT_PATTERNS.some((re) => re.test(line))) scan.environment.push(line);
   }
+  scan.uncovered = scriptAfterSummary || runnerFailed;
   return scan;
 }
 
@@ -239,7 +261,7 @@ interface Pipeline {
 function parsePipelines(command: string): Pipeline[] {
   const src = stripHeredocs(command);
   const out: Pipeline[] = [];
-  type Frame = { seg: string; stages: string[]; quote: '' | '"' | "'"; close: '' | ')' | '`' };
+  type Frame = { seg: string; stages: string[]; quote: '' | '"' | "'" | "$'"; close: '' | ')' | '`' };
   const stack: Frame[] = [{ seg: '', stages: [], quote: '', close: '' }];
   const stage = (f: Frame) => { if (f.seg.trim()) f.stages.push(f.seg.trim()); f.seg = ''; };
   const end = (f: Frame) => { stage(f); if (f.stages.length) out.push({ stages: f.stages, captured: f.close !== '' }); f.stages = []; };
@@ -249,6 +271,8 @@ function parsePipelines(command: string): Pipeline[] {
     const c = src[i]!;
     if (f.quote === "'") { f.seg += c; if (c === "'") f.quote = ''; continue; }
     if (c === '\\') { f.seg += c + (src[i + 1] ?? ''); i++; continue; }
+    if (f.quote === "$'") { f.seg += c; if (c === "'") f.quote = ''; continue; }
+    if (c === '$' && src[i + 1] === "'" && !f.quote) { f.quote = "$'"; f.seg += "$'"; i++; continue; }
     if (c === '$' && src.startsWith('((', i + 1)) {
       const close = src.indexOf('))', i + 3);
       const stop = close < 0 ? src.length : close + 2;
@@ -279,7 +303,125 @@ export function shellSegments(command: string): string[] {
   return parsePipelines(command).flatMap((p) => p.stages);
 }
 
-const HEREDOC = /(?<!<)<<(?!<)-?\s*['"]?(\w+)['"]?/;
+/** A heredoc redirection (`<<EOF`, `<<-'EOF'`) at `[start, end)` of its line, with the body it reads. */
+interface Heredoc {
+  start: number;
+  end: number;
+  delimiter: string;
+  /** `<<-`: leading tabs are stripped from body lines and the delimiter line */
+  stripTabs: boolean;
+  body: string[];
+}
+
+/** Shell quoting context: code (top level, `$(…)`, backticks), quotes, and arithmetic (`close` is `)` for `$((`). */
+type QuoteFrame = { kind: 'code' | "'" | "$'" | '"' | 'arith'; close: '' | ')' | '`'; depth: number };
+
+/**
+ * Heredoc operators on one line of a script, outside quotes, comments,
+ * here-strings (`<<<`), and arithmetic (`$((1<<2))`). `stack` is the quoting
+ * context the line starts in and is left where the line ends, so a quote or
+ * `$(…)` left open carries into the next line. `continues` when a quote stays
+ * open or the line ends in a backslash: the command line, and so the point
+ * where heredoc bodies begin, extends past this line.
+ */
+function heredocOperators(line: string, stack: QuoteFrame[]): { ops: Heredoc[]; continues: boolean } {
+  const ops: Heredoc[] = [];
+  let escapedNewline = false;
+  for (let i = 0; i < line.length; i++) {
+    const f = stack[stack.length - 1]!;
+    const c = line[i]!;
+    if (f.kind === "'") { if (c === "'") stack.pop(); continue; }
+    if (f.kind === "$'") { if (c === '\\') i++; else if (c === "'") stack.pop(); continue; }
+    if (c === '\\') { if (i === line.length - 1) escapedNewline = true; i++; continue; }
+    if (c === '$' && line[i + 1] === '(') {
+      if (line[i + 2] === '(') { stack.push({ kind: 'arith', close: ')', depth: 0 }); i += 2; }
+      else { stack.push({ kind: 'code', close: ')', depth: 0 }); i++; }
+      continue;
+    }
+    if (c === '`') {
+      if (f.kind === 'code' && f.close === '`') stack.pop();
+      else stack.push({ kind: 'code', close: '`', depth: 0 });
+      continue;
+    }
+    if (f.kind === '"') { if (c === '"') stack.pop(); continue; }
+    if (f.kind === 'arith') {
+      if (c === '(') f.depth++;
+      else if (c === ')' && f.depth) f.depth--;
+      else if (c === ')' && line[i + 1] === ')') { stack.pop(); i++; }
+      else if (c === ')') {
+        // Not arithmetic after all: `((cd a) | x)` and `$((cd a) | x)` are nested subshells.
+        stack.pop();
+        if (f.close === ')') stack.push({ kind: 'code', close: ')', depth: 0 });
+        else stack[stack.length - 1]!.depth++;
+      }
+      continue;
+    }
+    const wordStart = i === 0 || /[\s;&|()]/.test(line[i - 1]!);
+    if (c === '$' && line[i + 1] === "'") { stack.push({ kind: "$'", close: '', depth: 0 }); i++; continue; }
+    if (c === "'" || c === '"') { stack.push({ kind: c, close: '', depth: 0 }); continue; }
+    if (c === '(' && line[i + 1] === '(' && wordStart) { stack.push({ kind: 'arith', close: '', depth: 0 }); i++; continue; }
+    if (c === '(') { f.depth++; continue; }
+    if (c === ')') { if (f.close === ')') { if (f.depth) f.depth--; else stack.pop(); } continue; }
+    if (c === '#' && wordStart) break; // a comment: the rest of the line
+    if (c !== '<' || line[i + 1] !== '<') continue;
+    if (line[i + 2] === '<') { i += 2; continue; } // here-string
+    let j = i + 2;
+    const stripTabs = line[j] === '-';
+    if (stripTabs) j++;
+    while (line[j] === ' ' || line[j] === '\t') j++;
+    let delimiter = '', any = false;
+    for (; j < line.length && !/[\s;&|<>()]/.test(line[j]!); j++) {
+      const d = line[j]!;
+      any = true;
+      if (d === "'" || d === '"') {
+        const close = line.indexOf(d, j + 1);
+        const stop = close < 0 ? line.length : close;
+        delimiter += line.slice(j + 1, stop); j = stop;
+      } else if (d === '\\') { delimiter += line[j + 1] ?? ''; j++; }
+      else delimiter += d;
+    }
+    if (!any) { i++; continue; }
+    // A file descriptor (`0<<EOF`) belongs to the operator.
+    let start = i;
+    while (start > 0 && /\d/.test(line[start - 1]!)) start--;
+    if (start > 0 && !/[\s;&|()]/.test(line[start - 1]!)) start = i;
+    ops.push({ start, end: j, delimiter, stripTabs, body: [] });
+    i = j - 1;
+  }
+  const top = stack[stack.length - 1]!.kind;
+  return { ops, continues: escapedNewline || top === "'" || top === "$'" || top === '"' };
+}
+
+/**
+ * Lines of a script with each heredoc's body attached to the operator that
+ * reads it. Bodies are removed from the lines; `unterminated` when a body
+ * runs to the end of the script.
+ */
+function heredocLines(command: string): { lines: Array<{ text: string; heredocs: Heredoc[] }>; unterminated: boolean } {
+  const src = command.split('\n');
+  const lines: Array<{ text: string; heredocs: Heredoc[] }> = [];
+  const stack: QuoteFrame[] = [{ kind: 'code', close: '', depth: 0 }];
+  let pending: Heredoc[] = [];
+  let unterminated = false;
+  for (let n = 0; n < src.length; n++) {
+    const { ops, continues } = heredocOperators(src[n]!, stack);
+    lines.push({ text: src[n]!, heredocs: ops });
+    pending.push(...ops);
+    if (continues) continue;
+    // Bodies follow the end of the command line, one after another.
+    for (const h of pending) {
+      let closed = false;
+      while (++n < src.length) {
+        const body = h.stripTabs ? src[n]!.replace(/^\t+/, '') : src[n]!;
+        if (body === h.delimiter) { closed = true; break; }
+        h.body.push(body);
+      }
+      if (!closed) unterminated = true;
+    }
+    pending = [];
+  }
+  return { lines, unterminated };
+}
 
 /**
  * Drop heredoc bodies (file contents, Python scripts…), except a body fed to
@@ -288,23 +430,25 @@ const HEREDOC = /(?<!<)<<(?!<)-?\s*['"]?(\w+)['"]?/;
  */
 function stripHeredocs(command: string): string {
   const kept: string[] = [];
-  let delimiter: string | undefined;
-  let shellBody = false, after = '';
-  for (const line of command.split('\n')) {
-    if (delimiter) {
-      if (line.trim() === delimiter) { if (shellBody) kept.push(`} ${after}`); delimiter = undefined; }
-      else if (shellBody) kept.push(line);
-      continue;
+  for (const { text, heredocs } of heredocLines(command).lines) {
+    // The line without its operators; the first heredoc fed to a shell splits it around the body.
+    let line = '', from = 0;
+    let shell: { head: string; body: string[] } | undefined;
+    for (const h of heredocs) {
+      line += text.slice(from, h.start);
+      from = h.end;
+      if (shell) { line += ' '; continue; }
+      const start = line.search(/[^;&|(]*$/);
+      const owner = words(line.slice(start)).filter((w) => !/^\d*[<>]/.test(w));
+      const inv = shellInvocation(owner.slice(1));
+      if (owner.length > 0 && SHELLS.has(base(owner[0]!)) && inv.command === undefined && inv.script === undefined) {
+        shell = { head: `${line.slice(0, start)} {`, body: h.body };
+        line = '';
+      } else line += ' ';
     }
-    const here = line.match(HEREDOC);
-    if (!here) { kept.push(line); continue; }
-    delimiter = here[1];
-    const before = line.slice(0, here.index);
-    after = line.slice(here.index! + here[0].length);
-    const start = before.search(/[^;&|(]*$/);
-    const owner = words(before.slice(start)).filter((w) => !/^\d*[<>]/.test(w));
-    shellBody = owner.length > 0 && SHELLS.has(base(owner[0]!)) && !shellInvocation(owner.slice(1)).command && !shellInvocation(owner.slice(1)).script;
-    kept.push(shellBody ? `${before.slice(0, start)} {` : `${before} ${after}`);
+    line += text.slice(from);
+    if (shell) kept.push(shell.head, stripHeredocs(shell.body.join('\n')), `} ${line}`);
+    else kept.push(line);
   }
   return kept.join('\n');
 }
@@ -467,7 +611,11 @@ function stageInfo(segment: string, depth: number): StageInfo {
     let i = 1;
     while (i < w.length && w[i]!.startsWith('-')) i += /^-[Cc]$/.test(w[i]!) ? 2 : 1;
     const sub = w[i];
-    if (sub === 'diff' && w.slice(i + 1).some((x) => x === '--exit-code' || x === '--quiet')) return kind('compare', true);
+    const paths = w.indexOf('--', i + 1);
+    const options = w.slice(i + 1, paths < 0 ? undefined : paths);
+    // Validation: exits non-zero on whitespace errors and conflict markers.
+    if (sub && (/^diff(?:-index|-files|-tree)?$/.test(sub) || sub === 'show' || sub === 'log') && options.includes('--check')) return kind('check');
+    if (sub === 'diff' && options.some((x) => x === '--exit-code' || x === '--quiet')) return kind('compare', true);
     if (sub === 'stash' || sub === 'worktree') return w[i + 1] === 'list' ? kind('lookup') : w[i + 1] === 'show' ? kind('lookup', true) : kind('quiet');
     return sub && GIT_LOOKUP.has(sub) ? kind('lookup', !GIT_METADATA.has(sub)) : kind('quiet');
   }
@@ -529,17 +677,9 @@ export function testRunner(tool: string, input: unknown): string | undefined {
   const i = (input ?? {}) as Record<string, unknown>;
   let command = String(i.command ?? '');
   // Ignore heredoc bodies (which can themselves contain apparent commands).
-  const lines = command.split('\n');
-  const kept: string[] = [];
-  let delimiter: string | undefined;
-  for (const line of lines) {
-    if (delimiter) { if (line.trim() === delimiter) delimiter = undefined; continue; }
-    const here = line.match(/<<-?\s*['"]?(\w+)['"]?/);
-    if (here) { delimiter = here[1]; kept.push(line.slice(0, here.index)); }
-    else kept.push(line);
-  }
-  if (delimiter) return undefined;
-  command = kept.join('\n').replace(/\s+2>&1(?=\s|$)/g, '');
+  const { lines, unterminated } = heredocLines(command);
+  if (unterminated) return undefined;
+  command = lines.map((l) => (l.heredocs.length ? l.text.slice(0, l.heredocs[0]!.start) : l.text)).join('\n').replace(/\s+2>&1(?=\s|$)/g, '');
   // Dynamic shell state cannot establish an equivalent suite reliably.
   if (/[$`]|\b(pushd|popd|eval|source|exec)\b/.test(command)) return undefined;
   const segments: string[] = [];
@@ -560,7 +700,7 @@ export function testRunner(tool: string, input: unknown): string | undefined {
   segments.push(segment.trim());
   const scope: string[] = [typeof i.cwd === 'string' ? i.cwd : '.'];
   let check: string | undefined;
-  const runner = /^(?:(?:npm|pnpm|yarn|bun) (?:run )?(?:test|typecheck|build|lint)\b|node --test\b|(?:npx )?(?:vitest|jest|mocha|playwright test|tsc)\b|pytest\b|python3? -m (?:pytest|unittest)\b|cargo (?:test|check|build|clippy)\b|go (?:test|vet|build)\b|make (?:test|check)\b|(?:mvn|gradle|\.\/gradlew) (?:test|check|build)\b|(?:bundle exec )?rspec\b|rake test\b|swift test\b|xcodebuild test\b)/;
+  const runner = /^(?:(?:npm|pnpm|yarn|bun) (?:run )?(?:test|typecheck|build|lint)\b|node --test\b|(?:npx )?(?:vitest|jest|mocha|playwright test|tsc)\b|pytest\b|python3? -m (?:pytest|unittest)\b|cargo (?:test|check|build|clippy)\b|go (?:test|vet|build)\b|make (?:test|check)\b|(?:mvn|gradle|\.\/gradlew) (?:test|check|build)\b|(?:bundle exec )?rspec\b|rake test\b|swift test\b|xcodebuild test\b|git (?:diff(?:-index|-files|-tree)?|show|log)(?: (?!--(?:\s|$))[^\s|]+)* --check(?:\s|$))/;
   for (const raw of segments.filter(Boolean)) {
     if (/^cd\s+/.test(raw)) { scope.push(raw.slice(3).trim()); continue; }
     // A newline in a failed pipeline or a second check is ambiguous; do not
