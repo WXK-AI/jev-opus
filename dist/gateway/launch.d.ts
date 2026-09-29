@@ -44,6 +44,8 @@ export declare function resolveClaude(explicit: string | undefined, env: Record<
 export declare function launchClaude(jev: JevLike | null, bounds: Bounds, claudeArgs: string[], trace?: (e: Record<string, unknown>) => void): Promise<number>;
 /** Claude Code statusLine command: shows the effort Jev picked for this session. */
 export declare function statusline(): Promise<void>;
+/** The status line for Claude Code's statusLine JSON input. */
+export declare function statusLineText(raw: string, statusDir: string): string;
 /** "◆ Jev · MEDIUM → HIGH → MEDIUM · verifying": the current prompt's whole path, newest last. */
 export declare function formatStatusLine(s: {
     effort: string;

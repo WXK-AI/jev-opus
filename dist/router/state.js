@@ -44,7 +44,7 @@ export function fingerprint(call) {
  * Matching is intentionally conservative — a genuine code or test bug must
  * never be reclassified as an environment blocker.
  */
-const ENVIRONMENT_PATTERNS = [
+export const ENVIRONMENT_PATTERNS = [
     /\bE(NOTFOUND|CONNREFUSED|CONNRESET|CONNABORTED|TIMEDOUT|SOCKETTIMEDOUT|AI_AGAIN|HOSTUNREACH|NETUNREACH|PIPE)\b/i,
     /\b(fetch failed|socket hang up|network error|could not resolve host|temporary failure in name resolution|getaddrinfo|dns (lookup|resolution)|no route to host|connection (refused|reset|timed out)|request timed out|network timeout)\b/i,
     /\b(EACCES|EPERM)\b|permission denied|operation not permitted|access (is )?denied/i,
@@ -53,6 +53,9 @@ const ENVIRONMENT_PATTERNS = [
     /\bnpm (err|error)!?\s*(code\s+)?(econnrefused|enotfound|etimedout|eai_again|network)|registry[^\n]{0,60}(unreachable|timed out|error|unable)|temporary failure resolving/i,
     /\b(rate limit(ed)?|too many requests|service unavailable|bad gateway|gateway time-?out|upstream (error|unavailable))\b/i,
 ];
+const FAILURE_CAUSES = ['tool-error', 'interrupted', 'check-summary', 'check-output', 'output-text'];
+/** Tool ids are opaque (`toolu_…`); anything else is not journaled. */
+const SAFE_TOOL_ID = /^[\w-]{1,80}$/;
 const LOOKUP_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'NotebookRead', 'WebFetch', 'WebSearch']);
 const LOOKUP_COMMANDS = new Set(['ls', 'cat', 'find', 'grep', 'rg', 'head', 'tail', 'stat', 'file', 'which', 'type', 'test', '[', 'pwd', 'echo', 'wc', 'tree', 'eza', 'bat', 'less', 'more', 'du', 'df', 'readlink', 'realpath', 'basename', 'dirname', 'printf', 'true', 'command', 'cd']);
 /**
@@ -67,6 +70,10 @@ export function isExploratoryFailure(call) {
         return true;
     if (call.tool !== 'Bash')
         return false;
+    // Classified from the full command when available; the clipped one-line
+    // summary is only a fallback for callers that don't classify.
+    if (call.kind)
+        return call.kind === 'lookup';
     const segments = call.summary.replace(/…$/, '').split(/&&|\|\||;|\|/).map((x) => x.trim()).filter(Boolean);
     return segments.length > 0 && segments.every((seg) => LOOKUP_COMMANDS.has(seg.split(/\s+/)[0].replace(/^command$/, 'command')));
 }
@@ -87,12 +94,18 @@ export function reduceBatch(state, batch, effort) {
     const clock = state.clock + 1;
     const outcome = {
         newIssues: [], repeated: [], resolved: [],
-        failedCalls: 0, exploratoryFailures: 0, environmentFailures: 0, environmentOnly: false, progress: 'steady',
+        failedCalls: 0, exploratoryFailures: 0, environmentFailures: 0, suspectFailures: 0, environmentOnly: false, progress: 'steady',
     };
     const cleared = new Set();
     for (const call of batch) {
         const readable = commandKey(call);
         const command = identity(readable);
+        // Failure-like text from a command that isn't a recognized check is not
+        // a verdict: neither a failure that opens an issue nor a clean success.
+        if (!call.failed && call.suspect) {
+            outcome.suspectFailures++;
+            continue;
+        }
         // Looking around (a glob with no matches, a missing file) is not a
         // correctness failure: it neither escalates nor lingers as an open issue.
         if (call.failed && isExploratoryFailure(call)) {
@@ -116,8 +129,10 @@ export function reduceBatch(state, batch, effort) {
             }
             else {
                 issue = {
-                    fingerprint: fp, command, label: readable.slice(0, 80), environment, attempts: 1, tried: [effort], lastSeen: clock,
+                    fingerprint: fp, command, label: readable.slice(0, 80), environment, attempts: 1, tried: [effort], lastSeen: clock, since: clock,
                     ...(call.runner ? { runner: identity(`runner:${call.runner}`) } : {}),
+                    ...(call.cause ? { cause: call.cause } : {}),
+                    ...(call.id && SAFE_TOOL_ID.test(call.id) ? { toolId: call.id } : {}),
                 };
                 issues.push(issue);
                 outcome.newIssues.push(issue);
@@ -164,8 +179,24 @@ export function reviveCore(raw) {
                 tried: Array.isArray(i.tried) ? i.tried.filter(isEffort) : [],
                 lastSeen: typeof i.lastSeen === 'number' && Number.isFinite(i.lastSeen) ? Math.floor(i.lastSeen) : clock,
                 ...(typeof i.runner === 'string' ? { runner: i.runner } : {}),
+                ...(typeof i.since === 'number' && Number.isFinite(i.since) ? { since: Math.floor(i.since) } : {}),
+                ...(typeof i.cause === 'string' && FAILURE_CAUSES.includes(i.cause) ? { cause: i.cause } : {}),
+                ...(typeof i.toolId === 'string' && SAFE_TOOL_ID.test(i.toolId) ? { toolId: i.toolId } : {}),
             });
         }
     }
     return { clock, issues, last: null };
+}
+/** Why effort may be held: each open issue, where it came from, and what clears it. */
+export function auditIssues(state) {
+    return state.issues.map((i) => ({
+        id: i.fingerprint.slice(0, 8),
+        ...(i.cause ? { cause: i.cause } : {}),
+        ...(i.toolId ? { toolId: i.toolId } : {}),
+        environment: i.environment,
+        attempts: i.attempts,
+        tried: [...i.tried],
+        age: state.clock - (i.since ?? i.lastSeen),
+        clears: i.runner ? 'check-passes' : 'command-succeeds',
+    }));
 }

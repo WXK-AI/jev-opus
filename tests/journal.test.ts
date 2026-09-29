@@ -7,7 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { Journal, type JournalRecord } from '../src/gateway/journal.ts';
 import { GATEWAY_AUTH_HEADER, JevGateway } from '../src/gateway/server.ts';
-import { prefixHashes, type Message } from '../src/gateway/transcript.ts';
+import { effortInForce, prefixHashes, type Message } from '../src/gateway/transcript.ts';
 import { neutralAnswers, parseAnswers, type JevLike, type JevQuestion, type JevResult } from '../src/jev/client.ts';
 
 const TEST_AUTH_TOKEN = 'test-gateway-token';
@@ -390,6 +390,239 @@ test('gateway restart: a new instance continues the conversation from the same j
   }
 });
 
+test('gateway restart: a manual /effort from the last prompt does not survive into the next automatic prompt', async () => {
+  const up = await fakeUpstream();
+  const dir = tmpdir();
+  const stmt = (effort: string): Message => ({ role: 'system', content: [], output_config: { effort } });
+  const bounds = { min: 'low', max: 'low' } as const;
+  const m1 = [u('rename x to y'), stmt('medium')];
+  const m2 = [...m1, a('t1', 'ls'), stmt('high'), r('t1', 'a.js')];
+  const gw1 = testGateway({ jev: null, bounds, upstream: up.url, journalDir: dir });
+  const base1 = await gw1.listen();
+  await post(base1, body(m1));
+  await post(base1, body(m2));
+  assert.equal(effortInForce(up.seen.at(-1)!.body!.messages as Message[], 'low'), 'high', 'the manual override applies to its own prompt');
+  await gw1.close();
+
+  const gw2 = testGateway({ jev: null, bounds, upstream: up.url, journalDir: dir });
+  const base2 = await gw2.listen();
+  try {
+    const m3: Message[] = [...m2, { role: 'assistant', content: [{ type: 'text', text: 'done' }] }, u('now rename y to z')];
+    await post(base2, body(m3));
+    const sent = up.seen.at(-1)!.body!.messages as Message[];
+    assert.equal(effortInForce(sent, 'low'), 'low', 'automatic routing resumes at its own level, within bounds');
+  } finally {
+    await gw2.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('audit --holds names the tool call and cause behind every open failure', async () => {
+  const up = await fakeUpstream();
+  const dir = tmpdir();
+  const gw = testGateway({ jev: null, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+  const base = await gw.listen();
+  try {
+    const m1 = [u('fix the failing date tests')];
+    const m2 = [...m1, a('toolu_diff', 'git diff -- src/checks.ts'), r('toolu_diff', '+const FAILURE_MARKER = /FAILED|FAIL/;\nFAIL\n')];
+    const m3 = [...m2, a('toolu_test', 'npm test 2>&1 | tail -3'), r('toolu_test', '# pass 4\n# fail 2\n')];
+    const m4 = [...m3, a('toolu_other', 'cd web && npm test 2>&1 | tail -3'), r('toolu_other', '# pass 9\n# fail 0\n')];
+    const m5 = [...m4, a('toolu_read', 'cat index.ts'), r('toolu_read', 'source')];
+    for (const m of [m1, m2, m3, m4, m5]) await post(base, body(m));
+
+    const { auditJournal, formatAudit } = await import('../src/gateway/audit.ts');
+    const all = auditJournal(dir);
+    assert.equal(all.summary.decisions, 5);
+    assert.equal(all.summary.holds.decisions, 3, 'the git diff opened nothing; the failing suite stays open through an unrelated pass and read');
+    assert.equal(all.summary.holds.blocked, 1, 'the escalation and its one-step delay do not count; the later read is held by the issue');
+    assert.deepEqual(all.summary.holds.byCause, { 'check-summary': 1 });
+    const text = formatAudit(all);
+    assert.match(text, /open I-[0-9a-f]{8} · check-summary from toolu_test · opened this step · 1 failed run at \w+ · clears when the same check passes/);
+    assert.match(text, /observed: toolu_test check failed \(check-summary\)/);
+    const held = auditJournal(dir, '', { holds: true });
+    assert.equal(held.summary.decisions, 1);
+    const heldText = formatAudit(held);
+    assert.match(heldText, /held at HIGH: the open issues below blocked a step down\n  open I-[0-9a-f]{8} · check-summary from toolu_test · open 2 steps · /);
+    assert.doesNotMatch(JSON.stringify(held), /FAILURE_MARKER|npm test|# fail/, 'no command or output text in the audit');
+  } finally {
+    await gw.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('every replay-only request follows its own branch in memory and after restart', async () => {
+  const up = await fakeUpstream();
+  const dir = tmpdir();
+  const statusDir = tmpdir();
+  let decisions = 0;
+  const options = { jev: null, bounds: { min: 'low', max: 'high' } as const, upstream: up.url, journalDir: dir, statusDir, onDecision: () => { decisions++; } };
+  let gw = testGateway(options);
+  let base = await gw.listen();
+  try {
+    const first = [u('fix the bug')];
+    await post(base, body(first));
+    const branchA = [...first, a('t1', 'npm test'), r('t1', 'FAIL assertion', true)];
+    await post(base, body(branchA));
+    const sentA = up.seen.at(-1)!.body!.messages as Message[];
+    const branchB = [...first, a('t1', 'npm test'), r('t1', '# pass 3\n# fail 0')];
+    await post(base, body(branchB));
+    const sentB = up.seen.at(-1)!.body!.messages as Message[];
+    assert.equal(effortInForce(sentA, 'low'), 'high');
+    assert.equal(effortInForce(sentB, 'low'), 'low');
+    const events = () => fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('');
+    const before = events();
+    const status = fs.readFileSync(path.join(statusDir, 'sess-1.json'), 'utf8');
+    for (const restart of [false, true]) {
+      if (restart) {
+        await gw.close();
+        gw = testGateway(options);
+        base = await gw.listen();
+      }
+      for (const [original, generated] of [[branchA, sentA], [branchB, sentB], [branchA, sentA]] as const) {
+        const suffix: Message[] = [{ role: 'assistant', content: 'Done.' }, u('[SUGGESTION MODE: Suggest the next prompt.]')];
+        for (const [endpoint, includeTools] of [['/v1/messages/count_tokens', true], ['/v1/messages', false], ['/v1/messages', true]] as const) {
+          const res = await fetch(base + endpoint, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN },
+            body: JSON.stringify({ ...body([...original, ...suffix]), tools: includeTools ? tools : [] }),
+          });
+          await res.text();
+          assert.equal(res.status, 200);
+          assert.deepEqual(up.seen.at(-1)!.body!.messages, [...generated, ...suffix], `${endpoint}, tools=${includeTools}, restarted=${restart}`);
+          assert.match(String(up.seen.at(-1)!.headers['anthropic-beta']), /mid-conversation-output-config/);
+        }
+      }
+      assert.equal(decisions, 3, 'replay never routes');
+      assert.equal(events(), before, 'replay never journals');
+      assert.equal(fs.readFileSync(path.join(statusDir, 'sess-1.json'), 'utf8'), status, 'replay never changes status');
+    }
+  } finally {
+    await gw.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(statusDir, { recursive: true, force: true });
+  }
+});
+
+test('replay-only requests do not forward an incomplete transcript when recovery fails', async () => {
+  const up = await fakeUpstream();
+  const dir = tmpdir();
+  const notices: string[] = [];
+  const options = { jev: null, bounds: { min: 'low', max: 'high' } as const, upstream: up.url, journalDir: dir, onNotice: (notice: string) => { notices.push(notice); } };
+  let gw = testGateway(options);
+  let base = await gw.listen();
+  try {
+    const messages = [u('fix the bug')];
+    await post(base, body(messages));
+    await gw.close();
+    const file = path.join(dir, fs.readdirSync(dir)[0]!);
+    fs.appendFileSync(file, 'invalid journal record\n');
+    const before = fs.readFileSync(file, 'utf8');
+    gw = testGateway(options);
+    base = await gw.listen();
+    for (const endpoint of ['/v1/messages/count_tokens', '/v1/messages']) {
+      const res = await fetch(base + endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN },
+        body: JSON.stringify({ model: 'jev/claude-opus-5-5', messages }),
+      });
+      assert.equal(res.status, 502);
+      assert.match(await res.text(), /Cannot read recovery journal/);
+    }
+    assert.equal(up.seen.length, 1, 'only the original generation was forwarded');
+    assert.equal(fs.readFileSync(file, 'utf8'), before, 'recovery does not rewrite a corrupt journal');
+    assert.ok(notices.some((notice) => notice.startsWith('journal read error (replay only):')));
+  } finally {
+    await gw.close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('token counting and tool-less requests replay earlier statements without deciding anything', async () => {
+  const up = await fakeUpstream();
+  const dir = tmpdir();
+  const statusDir = tmpdir();
+  const jev = scriptedJev([
+    { task_type: { choice: 'debugging', confidence: 0.9 }, difficulty: { score: 2.8 }, stakes: { noul: 0.1 } }, // → high (top level is low)
+  ]);
+  const send = async (base: string, url: string, payload: unknown) => fetch(`${base}${url}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-1', [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN },
+    body: JSON.stringify(payload),
+  }).then((res) => res.text());
+  const gw = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir, statusDir });
+  const base = await gw.listen();
+  const m1 = [u('rename x to y')];
+  const next = [...m1, { role: 'assistant', content: [{ type: 'text', text: 'done' }] } as Message, u('thanks')];
+  let gw2: JevGateway | undefined;
+  try {
+    await post(base, body(m1));
+    const generated = up.seen.at(-1)!.body!.messages as Message[];
+    assert.equal(generated.length, 2, 'the prompt got an inserted statement');
+    const events = () => fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('');
+    const before = events();
+    const status = fs.readFileSync(path.join(statusDir, 'sess-1.json'), 'utf8');
+
+    await send(base, '/v1/messages/count_tokens', { model: 'jev/claude-opus-5-5', tools, messages: next });
+    const counted = up.seen.at(-1)!;
+    assert.equal(counted.url, '/v1/messages/count_tokens');
+    assert.equal(counted.body!.model, 'claude-opus-5-5');
+    assert.deepEqual((counted.body!.messages as Message[]).slice(0, 2), generated, 'the counted transcript matches the generated one');
+    assert.match(String(counted.headers['anthropic-beta']), /mid-conversation-output-config/);
+
+    await send(base, '/v1/messages', { model: 'jev/claude-opus-5-5', stream: true, messages: next });
+    assert.deepEqual((up.seen.at(-1)!.body!.messages as Message[]).slice(0, 2), generated, 'a tool-less side request keeps the prefix');
+
+    assert.equal(jev.calls, 1, 'nothing was routed');
+    assert.equal(events(), before, 'no decision or attempt was journaled');
+    assert.equal(fs.readFileSync(path.join(statusDir, 'sess-1.json'), 'utf8'), status, 'the status line did not move');
+
+    // After a restart the journal alone supplies the replay.
+    await gw.close();
+    gw2 = testGateway({ jev, bounds: { min: 'low', max: 'high' }, upstream: up.url, journalDir: dir });
+    const base2 = await gw2.listen();
+    await send(base2, '/v1/messages/count_tokens', { model: 'jev/claude-opus-5-5', messages: next });
+    assert.deepEqual((up.seen.at(-1)!.body!.messages as Message[]).slice(0, 2), generated);
+
+    // An unrelated conversation has nothing to replay and passes through unchanged.
+    const other = [u('something else')];
+    await send(base2, '/v1/messages/count_tokens', { model: 'jev/claude-opus-5-5', messages: other });
+    assert.deepEqual(up.seen.at(-1)!.body!.messages, other);
+    assert.equal(up.seen.at(-1)!.headers['anthropic-beta'], undefined);
+  } finally {
+    await (gw2 ?? gw).close();
+    up.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(statusDir, { recursive: true, force: true });
+  }
+});
+
+test('switching to another model clears the Jev status line', async () => {
+  const up = await fakeUpstream();
+  const statusDir = tmpdir();
+  const gw = testGateway({ jev: null, bounds: { min: 'low', max: 'high' }, upstream: up.url, statusDir });
+  const base = await gw.listen();
+  const { statusLineText } = await import('../src/gateway/launch.ts');
+  const line = (model: Record<string, string> | undefined) => statusLineText(JSON.stringify({ session_id: 'sess-1', ...(model ? { model } : {}) }), statusDir);
+  try {
+    await post(base, body([u('rename x to y')]));
+    assert.match(line({ id: 'jev/claude-opus-5-5', display_name: 'Opus 5.5' }), /^◆ Jev · \w/);
+    assert.match(line({ id: 'claude-sonnet-5', display_name: 'Sonnet 5' }), /off/, 'another model selected: the saved Jev state is stale');
+
+    await post(base, { ...body([u('rename x to y')]), model: 'claude-sonnet-5' });
+    assert.equal(fs.existsSync(path.join(statusDir, 'sess-1.json')), false, 'the switch removes the saved state');
+    assert.match(line(undefined), /off/);
+    assert.match(line({ id: 'jev/claude-opus-5-5' }), /waiting for the first step/, 'switching back shows no stale level before the next decision');
+  } finally {
+    await gw.close();
+    up.close();
+    fs.rmSync(statusDir, { recursive: true, force: true });
+  }
+});
+
 test('telemetry: SSE usage and stop_reason are journaled as completed', async () => {
   const up = await fakeUpstream();
   const jev = scriptedJev([
@@ -764,4 +997,29 @@ test('journal recovery: a truncated last line (crash mid-append) is skipped; cor
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('audit --holds explains legacy decisions from their router snapshot', async () => {
+  const dir = tmpdir();
+  try {
+    const j = new Journal(dir);
+    const rec = (decisionId: string, kind: 'task' | 'step', issues: unknown[]): JournalRecord => ({
+      decisionId, requestFingerprint: decisionId, lastUser: 0, boundaryHash: 'h', insertions: [],
+      decision: { kind, effort: 'high', previous: 'high', changed: false, reasons: ['1 unresolved issue(s) → hold high'], source: 'local', jevLatencyMs: 0 },
+      routerSnapshot: { v: 2, hold: 0, base: 'medium', state: { clock: 4, issues } }, policy: 'test', requested: 'high', current: 'high',
+      kind, manual: false, turn: 4, consecutiveFailures: 0, clientEffort: null, profile: null, status: 'completed', at: 1,
+    });
+    const issue = { fingerprint: 'abcdef0123456789abcd', command: 'c', environment: false, attempts: 1, tried: ['medium'], lastSeen: 1 };
+    j.append('k', rec('d-task', 'task', [issue]));
+    j.append('k', rec('d-step', 'step', [issue, { ...issue, fingerprint: 'ffff', environment: true }]));
+    // Open issues on a decision that went up anyway did not hold anything.
+    j.append('k', { ...rec('d-raise', 'step', [issue]), decision: { kind: 'step', effort: 'high', previous: 'medium', changed: true, reasons: ['failed step → high'], source: 'local', jevLatencyMs: 0 }, current: 'medium' });
+    const all = await import('../src/gateway/audit.ts').then((m) => m.auditJournal(dir));
+    assert.deepEqual([all.summary.holds.decisions, all.summary.holds.blocked], [2, 1]);
+    const { auditJournal, formatAudit } = await import('../src/gateway/audit.ts');
+    const held = auditJournal(dir, '', { holds: true });
+    assert.deepEqual(held.journals.flatMap((x) => x.decisions.map((d) => d.decisionId)), ['d-step'], 'only step decisions with an open reasoning issue');
+    assert.match(formatAudit(held), /open I-abcdef01 · cause unrecorded · last failed 3 steps ago · 1 failed run at medium/);
+    assert.match(formatAudit(held), /open I-ffff · .*environment blocker \(never holds\)/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

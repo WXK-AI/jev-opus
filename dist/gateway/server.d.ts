@@ -62,6 +62,12 @@ export declare class JevGateway {
      * thread's queue and is decided exactly once.
      */
     private route;
+    /**
+     * Replay the statements this conversation already carries, without routing:
+     * no decision, no controller state, no journal attempt, no UI change.
+     * Returns null when there is nothing to replay.
+     */
+    private replayOnly;
     /** Apply a prepared transformation to a request's messages (retry-safe). */
     private replay;
     /**
@@ -83,6 +89,8 @@ export declare class JevGateway {
     private trimThreads;
     /** effort path of the current prompt per session, shown live in the status line */
     private readonly trails;
+    /** The session left Jev: its status line must not keep showing the last Jev decision. */
+    private clearStatus;
     private writeStatus;
 }
 export declare function isSideQuery(m: Message | undefined): boolean;

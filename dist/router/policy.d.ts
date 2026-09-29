@@ -13,7 +13,7 @@ export interface Bounds {
     max: Effort;
 }
 /** Version of this policy, recorded on every decision for provenance. */
-export declare const POLICY_VERSION = "policy.v2.1";
+export declare const POLICY_VERSION = "policy.v2.2";
 /** Misordered bounds are a configuration error: swap them rather than crash. */
 export declare function normalizeBounds(b: Bounds): Bounds;
 export declare function difficultyRank(d: number): number;
@@ -39,6 +39,7 @@ export interface StepEvidence {
 export declare function stepTarget(base: Effort, s: StepSignals, ev: StepEvidence, current: Effort): {
     effort: Effort;
     reasons: string[];
+    heldByIssues?: boolean;
 };
 /**
  * Anti-flapping: raises apply at once; after a raise the level is held for

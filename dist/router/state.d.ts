@@ -1,5 +1,5 @@
 import { type Effort } from '../effort.ts';
-import type { ToolCallSummary } from './types.ts';
+import type { FailureCause, IssueAudit, ToolCallSummary } from './types.ts';
 /**
  * Pure reducer over tool batches.
  *
@@ -27,6 +27,12 @@ export interface Issue {
     tried: Effort[];
     /** batch index when this issue was last observed */
     lastSeen: number;
+    /** batch index when this issue was first observed */
+    since?: number;
+    /** why the originating call counted as failed */
+    cause?: FailureCause;
+    /** tool_use id of the call that first reported this issue */
+    toolId?: string;
 }
 export interface BatchOutcome {
     /** issues first observed failing in this batch */
@@ -41,6 +47,8 @@ export interface BatchOutcome {
     exploratoryFailures: number;
     /** failed calls classified as environment blockers */
     environmentFailures: number;
+    /** successful calls whose output text looked like a failure (evaluator evidence only) */
+    suspectFailures: number;
     /** every failure in this batch was an environment blocker */
     environmentOnly: boolean;
     /** how the latest batch changed outcomes */
@@ -66,6 +74,13 @@ export declare function identity(text: string): string;
 /** Stable failure fingerprint: the command/test plus its normalized error text. */
 export declare function fingerprint(call: ToolCallSummary): string;
 /**
+ * Failures that reflect missing infrastructure, not reasoning problems:
+ * network/registry unreachability, permissions, credentials, missing commands.
+ * Matching is intentionally conservative — a genuine code or test bug must
+ * never be reclassified as an environment blocker.
+ */
+export declare const ENVIRONMENT_PATTERNS: readonly RegExp[];
+/**
  * A failed call that only looked something up: a lookup tool, or a shell
  * command whose every segment is a read-only lookup. A command with a test or
  * build runner is never exploratory, so check failures always count.
@@ -89,3 +104,5 @@ export declare function serializeCore(s: CoreState): {
 };
 /** Tolerant restore: invalid issues are dropped, a missing/garbage payload yields null. */
 export declare function reviveCore(raw: unknown): CoreState | null;
+/** Why effort may be held: each open issue, where it came from, and what clears it. */
+export declare function auditIssues(state: CoreState): IssueAudit[];

@@ -176,10 +176,14 @@ export async function statusline() {
     const chunks = [];
     for await (const c of process.stdin)
         chunks.push(c);
+    process.stdout.write(statusLineText(Buffer.concat(chunks).toString('utf8'), STATUS_DIR));
+}
+/** The status line for Claude Code's statusLine JSON input. */
+export function statusLineText(raw, statusDir) {
     let session = '';
     let model = '';
     try {
-        const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const input = JSON.parse(raw);
         session = input.session_id ?? '';
         // Claude Code reports the resolved display name ("Opus 5.5"), so recognise Jev by its model ID.
         model = `${input.model?.id ?? ''} ${input.model?.display_name ?? ''}`;
@@ -187,10 +191,12 @@ export async function statusline() {
     catch {
         // no input: still print something useful
     }
-    const s = session ? readStatus(STATUS_DIR, session) : null;
+    const jev = /jev\/|Jev/.test(model);
+    // A saved decision belongs to Jev: with another model selected it is stale.
+    const s = session && (jev || !model.trim()) ? readStatus(statusDir, session) : null;
     if (!s)
-        return void process.stdout.write(`◆ Jev ${/jev\/|Jev/.test(model) ? 'waiting for the first step' : 'off (pick "Opus 5.5 · Jev" in /model)'}`);
-    process.stdout.write(formatStatusLine(s));
+        return `◆ Jev ${jev ? 'waiting for the first step' : 'off (pick "Opus 5.5 · Jev" in /model)'}`;
+    return formatStatusLine(s);
 }
 /** "◆ Jev · MEDIUM → HIGH → MEDIUM · verifying": the current prompt's whole path, newest last. */
 export function formatStatusLine(s) {

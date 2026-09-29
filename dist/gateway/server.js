@@ -9,7 +9,7 @@ import { isEffort } from '../effort.js';
 import { ResponseTelemetry } from './telemetry.js';
 import { EffortDisplay, displayMode } from './display.js';
 import { Journal } from './journal.js';
-import { addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt, lastToolRound, prefixHashes, requestFingerprint, stripJevModel, userText, } from './transcript.js';
+import { addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt, lastToolRound, prefixHashes, requestFingerprint, statedEffortBefore, stripJevModel, userText, } from './transcript.js';
 const HOP_BY_HOP = new Set(['host', 'connection', 'content-length', 'accept-encoding', 'transfer-encoding', 'keep-alive', 'proxy-connection', 'upgrade']);
 const DROP_RESPONSE = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive']);
 const POLICY_VERSION = `gateway.v1+${TASK_SET_VERSION}+${STEP_SET_VERSION}`;
@@ -164,11 +164,23 @@ export class JevGateway {
                         telem = { key: routed.key, decisionId: routed.decisionId, attemptId: randomUUID(), decision: routed.decision, session: headers['x-claude-code-session-id'] ?? 'no-session', agent: headers['x-claude-code-agent-id'] ?? 'main' };
                     headers['anthropic-beta'] = addBeta(headers['anthropic-beta']);
                 }
+                else if (Array.isArray(parsed.messages)) {
+                    // Token counting and tool-less side requests must see the same
+                    // transcript the generation did, but never decide anything.
+                    const replayed = this.replayOnly(headers, parsed.messages);
+                    if (replayed) {
+                        parsed.messages = replayed;
+                        headers['anthropic-beta'] = addBeta(headers['anthropic-beta']);
+                    }
+                }
                 body = Buffer.from(JSON.stringify(parsed));
             }
             else if (parsed && pathname === '/v1/messages' && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
                 // Model switches must not label the next model's responses with a stale Jev decision.
-                this.display.clear(headers['x-claude-code-session-id'] ?? 'no-session', headers['x-claude-code-agent-id'] ?? 'main');
+                const session = headers['x-claude-code-session-id'] ?? 'no-session';
+                const agent = headers['x-claude-code-agent-id'] ?? 'main';
+                this.display.clear(session, agent);
+                this.clearStatus(session, agent);
             }
         }
         // The client may have gone away while the evaluator was preparing this request.
@@ -255,6 +267,12 @@ export class JevGateway {
      */
     async route(headers, body) {
         const messages = body.messages;
+        const lastUser = lastIndexOfRole(messages, 'user');
+        // Side queries must replay their own journaled branch, not whichever
+        // sibling the live controller happened to route most recently.
+        if (lastUser < 0 || isSideQuery(messages[lastUser])) {
+            return { messages: this.replayOnly(headers, messages) ?? messages };
+        }
         const session = headers['x-claude-code-session-id'] ?? 'no-session';
         const agent = headers['x-claude-code-agent-id'] ?? 'main';
         const hashes = prefixHashes(messages);
@@ -263,14 +281,6 @@ export class JevGateway {
         t.active++;
         this.trimThreads();
         try {
-            const lastUser = lastIndexOfRole(messages, 'user');
-            if (lastUser < 0)
-                return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
-            // Claude Code forks the conversation for side queries such as the next-prompt
-            // suggestion. Replay our statements so the fork shares the cache, but don't
-            // route it: it isn't a user prompt, and it must not move the status line.
-            if (isSideQuery(messages[lastUser]))
-                return { messages: applyInsertions(messages, validInsertions(t.insertions, messages, hashes)) };
             const fp = requestFingerprint(hashes[lastUser + 1], body);
             const hit = t.prepared.get(fp);
             if (hit)
@@ -294,6 +304,30 @@ export class JevGateway {
             t.active--;
             this.trimThreads();
         }
+    }
+    /**
+     * Replay the statements this conversation already carries, without routing:
+     * no decision, no controller state, no journal attempt, no UI change.
+     * Returns null when there is nothing to replay.
+     */
+    replayOnly(headers, messages) {
+        const session = headers['x-claude-code-session-id'] ?? 'no-session';
+        const agent = headers['x-claude-code-agent-id'] ?? 'main';
+        const hashes = prefixHashes(messages);
+        const key = `${session}|${agent}|${hashes[1]?.slice(0, 16) ?? 'empty'}`;
+        let records = this.threads.get(key)?.records;
+        if (!records && this.journal) {
+            try {
+                records = this.journal.records(key);
+            }
+            catch (err) {
+                this.opts.onNotice?.(`journal read error (replay only): ${err.message}`);
+                throw new Error('Cannot read recovery journal; request was not forwarded');
+            }
+        }
+        const tip = deepestBoundary(records ?? [], hashes);
+        const insertions = tip ? validInsertions(tip.insertions, messages, hashes) : [];
+        return insertions.length ? applyInsertions(messages, insertions) : null;
     }
     /** Apply a prepared transformation to a request's messages (retry-safe). */
     replay(p, key, messages, hashes) {
@@ -325,14 +359,20 @@ export class JevGateway {
             t.manual = false;
         if (client)
             t.clientEffort = client.effort;
-        const current = t.effort ?? client?.effort ?? (isEffort(topLevel) ? topLevel : 'medium');
+        // What the model would run this turn at if nothing were inserted: the last
+        // statement before this user turn in the forwarded transcript, Claude
+        // Code's own or ours. Deriving it from the transcript (not from our last
+        // insertion) keeps a later /effort statement from surviving a restart.
+        const current = statedEffortBefore(messages, t.insertions, lastUser) ?? (isEffort(topLevel) ? topLevel : 'medium');
         if (t.manual) {
+            // The transition the user made by hand: from the level routing had in force.
+            const before = t.effort ?? current;
             t.effort = client?.effort ?? current;
             const manual = {
-                kind: prompting ? 'task' : 'step', effort: t.effort, previous: current,
-                changed: t.effort !== current, reasons: ['manual override'], source: 'pinned', jevLatencyMs: 0,
+                kind: prompting ? 'task' : 'step', effort: t.effort, previous: before,
+                changed: t.effort !== before, reasons: ['manual override'], source: 'pinned', jevLatencyMs: 0,
             };
-            const rec = this.journalRecord(t, fp, lastUser, hashes, manual.effort, prompting ? 'task' : 'step', current, manual);
+            const rec = this.journalRecord(t, fp, lastUser, hashes, manual.effort, prompting ? 'task' : 'step', before, manual);
             t.decidedAt = lastUser + 1;
             this.journalAppend(key, rec, true);
             this.publishDecision(session, agent, rec);
@@ -434,9 +474,9 @@ export class JevGateway {
         t.clientEffort = tip?.clientEffort ?? null;
         t.prompt = tip ? lastPrompt(messages.slice(0, tip.lastUser + 1)) : '';
         t.decidedAt = tip ? tip.lastUser + 1 : 0;
-        // Effort in force at the new boundary: the last surviving statement,
-        // else whatever the ancestor left in force.
-        t.effort = [...t.insertions].reverse().find((i) => i.index <= lastUser)?.effort ?? tip?.requested ?? null;
+        // Effort in force at the new boundary, in transcript order: Claude Code's
+        // own statements count as much as the surviving insertions.
+        t.effort = statedEffortBefore(messages, t.insertions, lastUser) ?? tip?.requested ?? null;
         t.tip = tip;
     }
     publishDecision(session, agent, rec) {
@@ -506,6 +546,16 @@ export class JevGateway {
     }
     /** effort path of the current prompt per session, shown live in the status line */
     trails = new Map();
+    /** The session left Jev: its status line must not keep showing the last Jev decision. */
+    clearStatus(session, agent) {
+        if (!this.opts.statusDir || agent !== 'main' || !/^[\w-]+$/.test(session))
+            return;
+        this.trails.delete(session);
+        try {
+            fs.rmSync(path.join(this.opts.statusDir, `${session}.json`), { force: true });
+        }
+        catch { /* the statusline is cosmetic */ }
+    }
     writeStatus(session, agent, d) {
         if (!this.opts.statusDir || agent !== 'main' || !/^[\w-]+$/.test(session))
             return;

@@ -6,8 +6,8 @@ import {
   PHASES, STEP_QUESTIONS, STEP_SET_VERSION, TASK_QUESTIONS, TASK_SET_VERSION, TASK_TYPES,
   type Phase, type TaskType,
 } from './questions.ts';
-import { emptyCore, isEnvironmentFailure, isExploratoryFailure, reasoningIssues, reduceBatch, reviveCore, serializeCore, type CoreState } from './state.ts';
-import type { EffortDecision, JevResponse, StepContext, StepSignals, TaskProfile } from './types.ts';
+import { auditIssues, emptyCore, isEnvironmentFailure, isExploratoryFailure, reasoningIssues, reduceBatch, reviveCore, serializeCore, type CoreState } from './state.ts';
+import type { DecisionEvidence, EffortDecision, JevResponse, StepContext, StepSignals, TaskProfile } from './types.ts';
 
 const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n)}…[+${s.length - n} chars]`);
 const sendFullEvaluatorContent = () => process.env.JEV_OPUS_EVALUATOR_CONTENT === 'full';
@@ -64,7 +64,8 @@ export function stepState(ctx: StepContext): string {
   if (!sendFullEvaluatorContent()) {
     const calls = ctx.lastBatch.map((c) => {
       const tool = SAFE_TOOL_NAMES.has(c.tool) ? c.tool : 'other tool';
-      return `- ${tool}: ${c.failed ? 'failed' : 'succeeded'}; check ${c.runner ? 'yes' : 'no'}; environment blocker ${c.failed && isEnvironmentFailure(c) ? 'yes' : 'no'}; exploratory ${c.failed && isExploratoryFailure(c) ? 'yes' : 'no'}`;
+      const outcome = c.failed ? 'failed' : c.suspect ? 'succeeded, but its output mentions failures (not a recognized check; unverified)' : 'succeeded';
+      return `- ${tool}: ${outcome}; check ${c.runner || c.kind === 'check' ? 'yes' : 'no'}; environment blocker ${c.failed && isEnvironmentFailure(c) ? 'yes' : 'no'}; exploratory ${c.failed && isExploratoryFailure(c) ? 'yes' : 'no'}`;
     });
     return [
       `TASK (${ctx.profile.taskType}, difficulty ${ctx.profile.difficulty.toFixed(1)}/4, stakes ${ctx.profile.stakes.toFixed(2)}; cues ${taskCues(ctx.prompt)})`,
@@ -81,7 +82,8 @@ export function stepState(ctx: StepContext): string {
   if (ctx.assistantNote) lines.push(`AGENT SAID: ${clip(ctx.assistantNote.trim(), 500)}`);
   lines.push('TOOL CALLS JUST MADE:');
   for (const c of ctx.lastBatch) {
-    lines.push(`- ${c.tool} ${clip(c.summary, 200)} → ${c.failed ? 'FAILED' : 'ok'}: ${clip(c.result.replace(/\s+/g, ' '), 400)}`);
+    const outcome = c.failed ? 'FAILED' : c.suspect ? 'ok (output mentions failures; not a recognized check, unverified)' : 'ok';
+    lines.push(`- ${c.tool} ${clip(c.summary, 200)} → ${outcome}: ${clip(c.result.replace(/\s+/g, ' '), 400)}`);
   }
   if (ctx.trajectory.length) lines.push(`EARLIER STEPS:\n${ctx.trajectory.slice(-6).join('\n')}`);
   return lines.join('\n');
@@ -199,7 +201,7 @@ export class EffortRouter {
     // Selective Jev: ask only when the answer could change the decision — a
     // failure, a proposed downgrade, stalled recovery, or an unclear phase.
     const proposedDown = rank(target.effort) < rank(ctx.current);
-    const consult = outcome.failedCalls > 0 || proposedDown || local.phaseConfidence < 0.5;
+    const consult = outcome.failedCalls > 0 || outcome.suspectFailures > 0 || proposedDown || local.phaseConfidence < 0.5;
 
     if (this.jev && consult) {
       const res = (await this.jev.ask(this.stepAskState(judged), STEP_QUESTIONS)) as JevResponse;
@@ -237,8 +239,18 @@ export class EffortRouter {
       target = stepTarget(this.base, signals, evidence(routineOk), ctx.current);
     }
 
+    // Count an issue hold only if clearing the issues would permit a lower
+    // final effort. Routine evidence, hysteresis and bounds can also block it.
+    const finishing = signals.phase === 'finishing';
+    let heldByIssues = false;
+    if (target.heldByIssues) {
+      const withoutIssues = stepTarget(this.base, signals, { ...evidence(routineOk), unresolved: 0 }, ctx.current);
+      const unheld = applyHysteresis(ctx.current, withoutIssues.effort, this.hold, finishing);
+      heldByIssues = rank(clampEffort(unheld.effort, bounds.min, bounds.max)) < rank(ctx.current);
+    }
+
     // Hysteresis first, then the legal range: bounds always apply last.
-    const h = applyHysteresis(ctx.current, target.effort, this.hold, signals.phase === 'finishing');
+    const h = applyHysteresis(ctx.current, target.effort, this.hold, finishing);
     this.hold = h.hold;
     const effort = clampEffort(h.effort, bounds.min, bounds.max);
     const reasons = recovered ? ['failing check now passes → release hold', ...target.reasons]
@@ -250,7 +262,25 @@ export class EffortRouter {
       kind: 'step', effort, previous: ctx.current, changed: effort !== ctx.current, reasons,
       source, jevLatencyMs, jevError, signals, profile: ctx.profile,
       policyVersion: POLICY_VERSION, questionVersions: { ...QUESTION_VERSIONS },
+      evidence: this.evidence(ctx, heldByIssues && effort === ctx.current),
     };
+  }
+
+  /** The audit trail for a step: open issues and this batch's failure observations. */
+  private evidence(ctx: StepContext, heldByIssues: boolean): DecisionEvidence {
+    const observed: DecisionEvidence['observed'] = [];
+    for (const c of ctx.lastBatch) {
+      const outcome = c.failed ? (isExploratoryFailure(c) ? 'exploratory' : 'failed') : c.suspect ? 'suspect' : null;
+      if (!outcome) continue;
+      observed.push({
+        ...(c.id && /^[\w-]{1,80}$/.test(c.id) ? { toolId: c.id } : {}),
+        tool: SAFE_TOOL_NAMES.has(c.tool) ? c.tool : 'other',
+        ...(c.kind ? { kind: c.kind } : {}),
+        ...(c.cause ? { cause: c.cause } : {}),
+        outcome,
+      });
+    }
+    return { open: auditIssues(this.core), ...(heldByIssues ? { heldByIssues } : {}), observed };
   }
 
   /**

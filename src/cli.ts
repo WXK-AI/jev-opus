@@ -32,6 +32,7 @@ Usage:
   jev-opus claude [args…]      your normal interactive Claude Code, with "Opus 5.5 · Jev" selected in /model
   jev-opus gateway [--port n]  run the Jev gateway for VS Code / JetBrains / Agent SDK (ANTHROPIC_BASE_URL)
   jev-opus audit [D-id] [--json]  inspect decisions, attempts, usage, and visual annotations
+  jev-opus audit --holds       only decisions with open failures, and why each one stays open
   jev-opus statusline          Claude Code statusLine command showing Jev's current effort
 
 Options:
@@ -118,6 +119,7 @@ async function main(): Promise<void> {
       'max-turns': { type: 'string' },
       verbose: { type: 'boolean', short: 'v' },
       json: { type: 'boolean' },
+      holds: { type: 'boolean' },
       'route-only': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean' },
@@ -128,7 +130,7 @@ async function main(): Promise<void> {
   if (values.version) return void console.log(packageVersion());
   if (positionals[0] === 'init') return void (await init());
   if (positionals[0] === 'audit') {
-    const report = auditJournal(path.join(CONFIG_DIR, 'journal'), positionals[1]);
+    const report = auditJournal(path.join(CONFIG_DIR, 'journal'), positionals[1], { holds: values.holds });
     console.log(values.json ? JSON.stringify(report, null, 2) : formatAudit(report));
     return;
   }

@@ -16,7 +16,7 @@ export interface Bounds {
 }
 
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v2.1';
+export const POLICY_VERSION = 'policy.v2.2';
 
 /** Misordered bounds are a configuration error: swap them rather than crash. */
 export function normalizeBounds(b: Bounds): Bounds {
@@ -85,8 +85,9 @@ export function stepTarget(
   s: StepSignals,
   ev: StepEvidence,
   current: Effort,
-): { effort: Effort; reasons: string[] } {
+): { effort: Effort; reasons: string[]; heldByIssues?: boolean } {
   const reasons: string[] = [];
+  let heldByIssues = false;
   const b = rank(base);
   const c = rank(current);
   let r = b;
@@ -143,6 +144,7 @@ export function stepTarget(
   if (r < c) {
     if (ev.unresolved > 0) {
       r = c;
+      heldByIssues = true;
       reasons.push(`${ev.unresolved} unresolved issue(s) → hold ${current}`);
     } else if (s.phase === 'diagnosing' || !ev.routineOk) {
       r = c;
@@ -159,7 +161,7 @@ export function stepTarget(
   if (b === MAX || c === MAX) cap = MAX;
   r = Math.min(r, cap);
 
-  return { effort: fromRank(r), reasons };
+  return { effort: fromRank(r), reasons, ...(heldByIssues ? { heldByIssues } : {}) };
 }
 
 /**

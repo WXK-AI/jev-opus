@@ -1,5 +1,12 @@
-/** Read-only export. Filters match a journal filename or a full/short decision ID. */
-export declare function auditJournal(dir: string, filter?: string): {
+import { type JournalRecord } from './journal.ts';
+/**
+ * Read-only export. Filters match a journal filename or a full/short decision
+ * ID; `holds` keeps only decisions where open issues kept effort from stepping
+ * down.
+ */
+export declare function auditJournal(dir: string, filter?: string, opts?: {
+    holds?: boolean;
+}): {
     schemaVersion: number;
     summary: {
         decisions: number;
@@ -7,10 +14,21 @@ export declare function auditJournal(dir: string, filter?: string): {
         observedOutputTokens: number;
         incompleteAttempts: number;
         legacyDecisions: number;
+        efforts: Record<string, number>;
+        holds: {
+            /** decisions with open reasoning issues */
+            decisions: number;
+            /** decisions where those issues kept effort from stepping down */
+            blocked: number;
+            /** of those, decisions that kept high, xhigh, or max in force */
+            blockedAtHighOrAbove: number;
+            issues: number;
+            byCause: Record<string, number>;
+        };
     };
     journals: {
         journal: string;
-        decisions: import("./journal.ts").JournalRecord[];
+        decisions: JournalRecord[];
         events: import("./journal.ts").JournalLine[];
     }[];
 };

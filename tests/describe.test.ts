@@ -1,19 +1,41 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { describeToolInput, looksFailed } from '../src/claude/describe.ts';
+import { classifyToolResult, commandKind, describeToolInput, shellSegments } from '../src/claude/describe.ts';
 
-test('looksFailed catches common test-runner failure output', () => {
-  assert.equal(looksFailed('Bash', { stdout: '# tests 3\n# pass 0\n# fail 3\n', stderr: '' }), true);
-  assert.equal(looksFailed('Bash', { stdout: '✖ leap years (1.2ms)\n', stderr: '' }), true);
-  assert.equal(looksFailed('Bash', { stdout: 'Tests: 2 failed, 5 passed', stderr: '' }), true);
-  assert.equal(looksFailed('Bash', { stdout: '', stderr: 'zsh: command not found: foo' }), true);
-  assert.equal(looksFailed('Bash', { stdout: '', stderr: '', exitCode: 2 }), true);
+const bash = (command: string, stdout: string, isError = false) => classifyToolResult('Bash', { command }, stdout, isError);
+
+test('a check whose output reports failures fails, even when a pipeline masked the exit status', () => {
+  assert.equal(bash('npm test 2>&1 | tail -5', '# tests 3\n# pass 0\n# fail 3\n').failed, true);
+  assert.equal(bash('node --test', '✖ leap years (1.2ms)\n').failed, true);
+  assert.equal(bash('npx jest | tail', 'Tests: 2 failed, 5 passed').failed, true);
+  assert.equal(bash('npm test | tail', 'bash: npm: command not found').failed, true);
+  assert.equal(classifyToolResult('Bash', { command: 'make' }, '', false, { stdout: '', stderr: '', exitCode: 2 }).failed, true);
+  assert.equal(classifyToolResult('Bash', { command: 'ls' }, '', false, { stdout: '', interrupted: true }).cause, 'interrupted');
+  assert.equal(bash('npm test', 'Exit code 1\nboom', true).cause, 'tool-error');
 });
 
-test('looksFailed leaves passing output alone', () => {
-  assert.equal(looksFailed('Bash', { stdout: '# tests 3\n# pass 3\n# fail 0\n', stderr: '' }), false);
-  assert.equal(looksFailed('Bash', { stdout: 'Tests: 0 failed, 7 passed', stderr: '' }), false);
-  assert.equal(looksFailed('Read', 'Error: this is just file content'), false);
+test('passing checks and non-checks leave output text alone', () => {
+  assert.equal(bash('npm test', '# tests 3\n# pass 3\n# fail 0\n').failed, false);
+  assert.equal(bash('npx jest', 'Tests: 0 failed, 7 passed').failed, false);
+  assert.equal(classifyToolResult('Read', { file_path: 'a.ts' }, 'Error: this is just file content', false).failed, false);
+  assert.equal(bash('cat src/checks.ts', 'const FAIL = /FAILED|FAIL/;\nFAIL\n').failed, false);
+  const suspect = bash('python3 analyze.py runs/', 'FAILED tests/test_x.py::test_y');
+  assert.deepEqual([suspect.failed, suspect.suspect, suspect.cause], [false, true, 'output-text']);
+});
+
+test('commands are classified from every simple command, not the clipped summary', () => {
+  assert.equal(commandKind('cd /repo; B=$(cat .base); git diff $B -- src'), 'lookup');
+  assert.equal(commandKind("sysctl -n hw.ncpu | awk '{print $1}'; docker info --format '{{.NCPU}}'; uptime; sed -n 1,80p a.py"), 'lookup');
+  assert.equal(commandKind("cd /r && python3 - <<'P'\nprint('npm test')\nP\nhead -1 a.ts; npx tsc --noEmit -p . && npm test 2>&1 | grep -E '^# (pass|fail)'"), 'check');
+  assert.equal(commandKind('git add a && git commit -q -m "x; npm test" && git log --oneline -1'), 'quiet');
+  assert.equal(commandKind("sed -i '' 's/a/b/' x.js"), 'quiet');
+  assert.equal(commandKind('echo "$(pytest | tail)"'), 'check');
+  assert.equal(commandKind('FOO=1 uv run pytest -q'), 'check');
+  assert.equal(commandKind('bash -c "cat a && npm run test:unit"'), 'check');
+  assert.equal(commandKind('./scripts/run-tests.sh'), 'check');
+  assert.equal(commandKind('for d in a b; do tail -3 $d/log.txt; done'), 'lookup');
+  assert.equal(commandKind('python3 trace.py runs/x | tail -20'), 'other');
+  assert.deepEqual(shellSegments('npm test 2>&1 | tail -3 # note'), ['npm test 2>&1', 'tail -3']);
 });
 
 test('describeToolInput renders the useful part of each tool input', () => {

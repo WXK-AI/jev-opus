@@ -115,7 +115,7 @@ Display options, set before the command or in `~/.config/jev-opus/.env`:
 - `JEV_OPUS_TOOL_NOTICES=0` turns off the tool-call notices.
 - `JEV_OPUS_SHOW_DECISION_IDS=1` adds short `D-…` references to badges, matching `jev-opus audit`.
 - `JEV_OPUS_NARRATION=1` asks Claude for a short line before each tool call. It adds output tokens, and Opus 5.5 often hides these lines, so it's off by default.
-- `JEV_OPUS_NO_INLINE_EFFORT=1` turns off all badges and notices; `JEV_OPUS_NO_STATUSLINE=1` turns off the status line.
+- `JEV_OPUS_NO_INLINE_EFFORT=1` turns off all badges and notices; `JEV_OPUS_NO_STATUSLINE=1` turns off the status line. Picking another model in `/model` turns the status line off; switching back shows the next Jev decision, never a stale one.
 
 [MessageDisplay](https://code.claude.com/docs/en/hooks#messagedisplay) annotations only change the display; they do not enter the stored model conversation. Tool-only responses do not trigger that hook, so native tool notices are the fallback. Display-message UUIDs differ from provider message IDs: audit records explicitly label text annotations as associated with the latest session decision, while tool annotations use the generating tool ID when available. The returned badge is logged; successful rendering or user visibility is not claimed.
 
@@ -123,7 +123,7 @@ Display options, set before the command or in `~/.config/jev-opus/.env`:
 
 - **Manual changes win.** Running `/effort` yourself pauses Jev until your next prompt.
 - **Subagents** are routed as their own threads.
-- **Side requests are never routed:** short requests without tools (titles, summaries), and Claude Code's next-prompt suggestion, which reuses the conversation. Their prefix still carries the inserted statements, so they share the cache.
+- **Side requests are never routed:** token counting (`/v1/messages/count_tokens`), short requests without tools (titles, summaries), and Claude Code's next-prompt suggestion, which reuses the conversation. Their prefix still carries their own branch's inserted statements (from the journal after a restart), so they share the cache and count the same transcript the model sees. They create no decision, journal entry, or status change. If journal recovery fails, the gateway returns an error instead of forwarding a transcript with missing statements.
 
 ### Other Claude Code surfaces
 
@@ -192,6 +192,7 @@ One controller (`src/router/`) serves both modes. It estimates the reasoning the
 - high stakes add a level
 
 **During the task,** a reducer tracks evidence across tool calls:
+- **What counts as a failure:** a tool error (non-zero exit, hook failure, interrupt) always does, including a failed `cmp`/`diff` comparison. Output text counts only when the command runs a recognized check (tests, type checks, builds, linters, `make test`, `./scripts/test.sh`, …), which catches failures a pipeline hides (`npm test 2>&1 | tail`). Commands are classified from every simple command in the full script, including `$(…)`, `bash -c`/`-lc` strings and heredocs fed to a shell, not the display summary. Because one output mixes every command's text, attribution is conservative: a check's own passing summary (`# fail 0`) clears stray failure words only when the command runs that one check; when the command also prints files or logs, failure markers are only *suspect* (a failing summary line still counts unless a log or saved output was read too). Reading source, diffs, or old logs (`cat`, `sed -n`, `grep`, `git diff`/`log`/`show`, `docker logs`, …) never fails on its text. Suspect evidence, which also covers failure words from an ad-hoc script, goes to the evaluator but never opens or clears an issue.
 - **Unresolved failures** are tracked by a stable fingerprint. A later pass of the same command or test clears them, even when rerun with recognized output plumbing such as `npm test 2>&1 | tail`. Check identities preserve explicit directories, runner commands, flags, targets, and case; a passing subset or another package cannot clear the original suite. Ambiguous shell commands use conservative command matching. A successful read in between does **not**.
 - **Recovery history:** a repeated failure goes one level above the highest effort already tried on it, up to your ceiling, so `max` is reachable when you allow it.
 - **Environment blockers** (network, registry, permissions, credentials, missing commands) hold the current effort instead of raising it.
@@ -222,7 +223,10 @@ jev-opus audit                     # list decisions, attempts, and observed outp
 jev-opus audit D-a3e014f2           # inspect a reference from audit output or debug badges
 jev-opus audit D-a3e014f2 --json    # export matching decisions and raw events
 jev-opus audit --json              # export all gateway journals
+jev-opus audit --holds             # only decisions where open failures kept effort from stepping down
 ```
+
+Step decisions record their failure evidence: every open issue with the cause code that opened it (`tool-error`, `check-summary`, `check-output`, …), the originating tool-use ID, its age in steps, the efforts already tried, and what clears it (the same check passing, or the same command succeeding). It also records whether clearing those issues would have allowed a step down after applying routine-evidence requirements, the post-escalation delay, and effort bounds; `--holds` lists just those decisions, with a summary by cause. For older journals without recorded evidence, holds are inferred from the saved reasons and issues are explained from the router snapshot (cause and tool ID unrecorded); those records cannot provide the same precision. No command or output text is stored.
 
 The owner-only JSONL files in `~/.config/jev-opus/journal/` are the durable source. A decision ID is created before its trace/display metadata; each actual upstream dispatch gets a distinct attempt ID, including retries of a shared decision. Attempt usage is aggregated once per attempt. Exports retain separate timestamps, provider IDs when available, and visual annotations without assistant text. Old records remain readable and are explicitly marked as legacy where attribution is unavailable.
 

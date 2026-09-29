@@ -250,6 +250,25 @@ test('a successful read between failures does not reset recovery', async () => {
   assert.equal(issues(r)[0]!.attempts, 2);
 });
 
+test('issue holds exclude decisions already held by hysteresis or the effort floor', async () => {
+  for (const bounded of [false, true]) {
+    const r = new EffortRouter({ jev: null, bounds: { min: bounded ? 'medium' : 'low', max: bounded ? 'medium' : 'max' } });
+    const task = await r.routeTask('hi', null);
+    const failed = await r.routeStep(step([fail('npm test', 'AssertionError')], task.effort));
+    assert.equal(failed.effort, 'medium');
+    assert.equal(failed.evidence?.heldByIssues, undefined, 'a failure escalation is not an issue hold');
+
+    const delayed = await r.routeStep(step([read()], failed.effort));
+    assert.equal(delayed.effort, 'medium');
+    assert.equal(delayed.evidence?.open.length, 1);
+    assert.equal(delayed.evidence?.heldByIssues, undefined, 'without the issue, hysteresis or the floor still prevents a step down');
+
+    const held = await r.routeStep(step([read()], delayed.effort));
+    assert.equal(held.effort, 'medium');
+    assert.equal(held.evidence?.heldByIssues, bounded ? undefined : true, 'only an otherwise permitted downgrade counts');
+  }
+});
+
 /* ---------- environment blockers ---------- */
 
 test('environment blockers hold the current effort and never escalate', async () => {
@@ -554,4 +573,21 @@ test('a failed exploratory lookup (glob with no matches) neither escalates nor l
   assert.equal(fail.effort, 'high', 'the real test failure escalates');
   const pass = await r.routeStep(ctx('high', [b("sed -i '' -e 's/a/b/' dates.js && npm test 2>&1 | tail -30", false, '# pass 3 # fail 0', 'npm test')], 3));
   assert.equal(pass.effort, 'medium', 'nothing lingers from the ls: effort steps down once the tests pass');
+});
+
+test('suspect output (failure text from a non-check) consults Jev but never opens or clears an issue', async () => {
+  const jev = stubJev(() => ({ answers: { phase: choice('exploring'), step_difficulty: score(1), stuck: noul(0.1) }, signals: allValid(['phase', 'step_difficulty', 'stuck']) }));
+  const r = lowTask(jev);
+  await r.routeTask('implement the feature', null);
+  const failing = fail('npm test', 'not ok 1 - dates');
+  await r.routeStep(step([{ ...failing, runner: 'npm test', kind: 'check', cause: 'check-output', id: 'toolu_1' }], 'medium'));
+  assert.equal(issues(r).length, 1);
+  const before = jev.calls.length;
+  const suspect: ToolCallSummary = { tool: 'Bash', summary: 'python3 report.py', failed: false, suspect: true, kind: 'other', cause: 'output-text', result: 'FAILED x' };
+  const d = await r.routeStep(step([suspect], 'high'));
+  assert.equal(jev.calls.length, before + 1, 'the evaluator judges ambiguous evidence');
+  assert.match(jev.calls.at(-1)!, /output mentions failures/);
+  assert.equal(issues(r).length, 1, 'suspect output neither opens nor resolves an issue');
+  assert.deepEqual(d.evidence!.observed, [{ tool: 'Bash', kind: 'other', cause: 'output-text', outcome: 'suspect' }]);
+  assert.equal(d.evidence!.open[0]!.toolId, 'toolu_1');
 });

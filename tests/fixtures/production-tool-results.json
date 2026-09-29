@@ -1,0 +1,80 @@
+{
+  "source": "Sanitized from a 2026-09-28 production Claude Code session (docs/production-session-review-2026-09-28.md). Paths are replaced and outputs trimmed to the lines that matter; command shapes and the failure-looking text are preserved.",
+  "falseFailures": [
+    {
+      "case": "system info + printing a Python file whose docstring says `uv: command not found` (D-b264fc02)",
+      "command": "sysctl -n hw.ncpu hw.memsize | awk 'NR==1{print $1\" cpus\"} NR==2{print $1/1e9\" GB\"}'; docker info --format '{{.NCPU}} cpu {{.MemTotal}} mem'; uptime; sed -n 1,80p /repo/docs/fh-summarize.py",
+      "output": "10 cpus\n17.1799 GB\n10 cpu 8319504384 mem\n 1:10  up 11 days,  1:57, 3 users, load averages: 3.17 3.78 4.15\n#!/usr/bin/env python3\n\"\"\"Summarize runs.\n\nVerifier-infra cells: run-tests.sh downloads uv at grading\ntime; when that download fails (\"uv: command not found\" in the verifier\noutput) the tests never ran, so the cell is infra_invalid.\n\"\"\"\nVERIFIER_INFRA = (\"uv: command not found\",)\n"
+    },
+    {
+      "case": "git diff showing a new failure-marker regex (D-b63f5ebe)",
+      "command": "cd /repo/agents/v7-gate; B=$(cat /repo/.agent-runs/v7-gate/base); git diff $B -- packages/runtime/src packages/cli/src",
+      "output": "diff --git a/packages/runtime/src/checks.ts b/packages/runtime/src/checks.ts\nnew file mode 100644\n--- /dev/null\n+++ b/packages/runtime/src/checks.ts\n@@ -0,0 +1,24 @@\n+const FAILURE_MARKER = /\\bDIFFERS?\\b|\\bAssertionError\\b|Traceback \\(most recent call last\\)|^--- FAIL\\b|^FAIL\\b|\\bFAIL:|\\bFAILED\\b|^not ok \\d|\\b[1-9]\\d* (failed|failing)\\b/gm;\n+export function falseGreenMarkers(command: string, output: string): string[] {\n"
+    },
+    {
+      "case": "git diff showing test fixtures that contain FAIL (D-49002f4a)",
+      "command": "cd /repo/agents/v7-gate; B=$(cat /repo/.agent-runs/v7-gate/base); git diff $B -- packages/runtime/test packages/cli/test",
+      "output": "diff --git a/packages/runtime/test/checks.test.ts b/packages/runtime/test/checks.test.ts\n+test(\"falseGreenMarkers finds distinct failure signs\", () => {\n+  assert.deepEqual(falseGreenMarkers(\"go test ./... 2>&1 | tail\", \"--- FAIL: TestX (0.01s)\\nFAIL\"), [\"--- FAIL\", \"FAIL\"]);\n+  assert.deepEqual(falseGreenMarkers(\"npm test\", \"Tests: 1 failed, 3 passed\"), [\"1 failed\"]);\n+  assert.deepEqual(falseGreenMarkers(\"cat zz_test.go\", \"FAIL\"), []);\n"
+    },
+    {
+      "case": "grep/wc source inspection printing the marker definition (D-27dd7624, held 34 decisions)",
+      "command": "cd /repo/packages/runtime/src; grep -n \"taskClauses\\|export function\\|MAX_\\|^const\" checks.ts prompt.ts | head -60; wc -l checks.ts prompt.ts",
+      "output": "checks.ts:1:const FAILURE_MARKER = /\\bDIFFERS?\\b|Traceback \\(most recent call last\\)|^--- FAIL\\b|^FAIL\\b|\\bFAIL:|\\bFAILED\\b|^not ok \\d/gm;\nchecks.ts:4:export function falseGreenMarkers(command: string, output: string): string[] {\nprompt.ts:53:const GATE_MAX_CLAUSES = 60;\n      23 checks.ts\n     142 prompt.ts\n     165 total\n"
+    },
+    {
+      "case": "cat/sed source inspection printing the same definition (D-2d909b2e)",
+      "command": "cd /repo/packages/runtime/src; cat checks.ts; sed -n 1,142p prompt.ts",
+      "output": "const FAILURE_MARKER = /\\bDIFFERS?\\b|Traceback \\(most recent call last\\)|^--- FAIL\\b|^FAIL\\b|\\bFAIL:|\\bFAILED\\b|^not ok \\d/gm;\n\n/** Failure text in a successful command result that may hide a failed check. */\nexport function falseGreenMarkers(command: string, output: string): string[] {\n  if ([\"cat\", \"sed\", \"grep\"].includes(first)) return [];\n}\nexport const SYSTEM_PROMPT = `If an approach fails repeatedly, step back.`;\n"
+    },
+    {
+      "case": "edit + verification printing the regex, then `# pass 130` / `# fail 0` (D-cf6b780d)",
+      "command": "cd /repo/packages/runtime; python3 - <<'P'\np=\"src/checks.ts\"; s=open(p).read()\na=\"|\\\\bFAILED\\\\b|\"; b=\"|(?<!\\\\b0 )\\\\bFAILED\\\\b|\"\nassert s.count(a)==1; s=s.replace(a,b); open(p,\"w\").write(s)\nP\nhead -1 src/checks.ts; npx tsc --noEmit -p . && npm test 2>&1 | grep -E \"^# (pass|fail)|not ok\"",
+      "output": "const FAILURE_MARKER = /\\bDIFFERS?\\b|^--- FAIL\\b|^FAIL\\b|\\bFAIL:|(?<!\\b0 )\\bFAILED\\b|^not ok \\d|\\b[1-9]\\d* (failed|failing)\\b/gm;\n# pass 130\n# fail 0\n"
+    },
+    {
+      "case": "commit whose message says `0 FAILED`, then a passing suite (D-1bb6f9de)",
+      "command": "cd /repo; git add packages/runtime/src/checks.ts packages/runtime/test/checks.test.ts && git commit -q -m \"fix(runtime): '0 FAILED' is not a failure\n\nCo-Authored-By: someone\" && git log --oneline -1\npython3 - <<'P'\nprint(\"patched\")\nP\nsed -n 10,16p packages/runtime/src/prompt.ts | cut -c1-160; cd packages/runtime && npx tsc --noEmit -p . && npm test 2>&1 | grep -E \"^# (pass|fail)|not ok\"",
+      "output": "4942a8f fix(runtime): false-green treats command substitution as a check; '0 FAILED' is not a failure; document detector as advisory\n\n# How to work\n5. Fix and repeat until every requirement is verified. If an approach fails repeatedly, step back.\n# pass 130\n# fail 0\n"
+    }
+  ],
+  "suspectOnly": [
+    {
+      "case": "a script summarizing historical trial logs",
+      "command": "cd /repo/runs; T=v10/trials/anko/t1; python3 .claude/skills/fh-eval/trace.py $T 2>&1 | tail -20",
+      "output": "    --- FAIL: TestTypedBindingsScopeAndControlFlow (0.06s)\nFAIL\n"
+    },
+    {
+      "case": "a loop over run directories printing old pytest summaries through a script",
+      "command": "cd /repo/runs; for d in v10-c/trials/sm/t2 v10-c/trials/meriyah/t1; do python3 score.py $d; done",
+      "output": "========================= 2 failed, 70 passed in 0.26s =========================\n"
+    }
+  ],
+  "genuineFailures": [
+    {
+      "case": "unittest failure behind `| grep | head` (exit status masked)",
+      "command": "cd /repo/docs/frontierharness; python3 -m unittest test_summarize 2>&1 | grep -B5 -A15 \"^FAIL:\" | head -40",
+      "output": "........F.\n======================================================================\nFAIL: test_single_run_output_matches_pre_change_golden (test_summarize.SummarizeTests.test_single_run_output_matches_pre_change_golden)\n----------------------------------------------------------------------\nTraceback (most recent call last):\nAssertionError: '## s[278 chars]' != '## s[278 chars]'\n"
+    },
+    {
+      "case": "node:test failure summary behind `| grep | head`",
+      "command": "cd /repo/agents/clause-fg/packages/runtime && npx tsc --noEmit -p . && npm test 2>&1 | grep -E \"^# (pass|fail|skip)|not ok\" | head",
+      "output": "not ok 7 - falseGreenMarkers classifies every command in a chain\n# pass 129\n# fail 1\n# skipped 5\n"
+    },
+    {
+      "case": "assertion diff only (grep kept no summary)",
+      "command": "cd /repo/agents/clause-fg/packages/runtime && node --test dist-test/test/checks.test.js 2>&1 | grep -E \"actual|expected|\\+|- \" | head -12",
+      "output": "    + actual - expected\n    + []\n    -   '1 failed'\n  expected:\n  actual:\n"
+    },
+    {
+      "case": "TAP failure detail behind `| grep | head`",
+      "command": "cd ../agents/model-caps/packages/cli && npm test 2>&1 | grep -B3 -A25 \"^not ok\" | head -50",
+      "output": "# Subtest: quality-engine defaults: system prompt, profile policy, runMeta\nnot ok 32 - quality-engine defaults: system prompt, profile policy, runMeta\n  ---\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly deep-equal:\n    + actual - expected\n"
+    },
+    {
+      "case": "missing tool behind a pipeline (environment blocker)",
+      "command": "cd /app && uv run pytest -q 2>&1 | tail -5",
+      "output": "bash: uv: command not found\n",
+      "environment": true
+    }
+  ]
+}

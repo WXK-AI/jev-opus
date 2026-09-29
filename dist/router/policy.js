@@ -1,6 +1,6 @@
 import { clampEffort, fromRank, rank } from '../effort.js';
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v2.1';
+export const POLICY_VERSION = 'policy.v2.2';
 /** Misordered bounds are a configuration error: swap them rather than crash. */
 export function normalizeBounds(b) {
     return rank(b.min) <= rank(b.max) ? b : { min: b.max, max: b.min };
@@ -56,6 +56,7 @@ export function taskEffort(p, bounds) {
 }
 export function stepTarget(base, s, ev, current) {
     const reasons = [];
+    let heldByIssues = false;
     const b = rank(base);
     const c = rank(current);
     let r = b;
@@ -129,6 +130,7 @@ export function stepTarget(base, s, ev, current) {
     if (r < c) {
         if (ev.unresolved > 0) {
             r = c;
+            heldByIssues = true;
             reasons.push(`${ev.unresolved} unresolved issue(s) → hold ${current}`);
         }
         else if (s.phase === 'diagnosing' || !ev.routineOk) {
@@ -145,7 +147,7 @@ export function stepTarget(base, s, ev, current) {
     if (b === MAX || c === MAX)
         cap = MAX;
     r = Math.min(r, cap);
-    return { effort: fromRank(r), reasons };
+    return { effort: fromRank(r), reasons, ...(heldByIssues ? { heldByIssues } : {}) };
 }
 /**
  * Anti-flapping: raises apply at once; after a raise the level is held for

@@ -23,6 +23,8 @@ export declare class EffortRouter {
     get usingJev(): boolean;
     routeTask(prompt: string, previous: Effort | null, conversationNote?: string): Promise<EffortDecision>;
     routeStep(ctx: StepContext): Promise<EffortDecision>;
+    /** The audit trail for a step: open issues and this batch's failure observations. */
+    private evidence;
     /**
      * JSON-serializable controller state, so an adapter can persist it with a
      * decision and restore the common-ancestor state after a rewind or restart.

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isEffort } from '../effort.js';
-import { describeToolInput, looksFailed, stringifyResult, testRunner } from '../claude/describe.js';
+import { stringifyResult, summarizeToolCall } from '../claude/describe.js';
 /**
  * Pure helpers for rewriting Claude Code's /v1/messages requests.
  *
@@ -111,6 +111,20 @@ export function applyInsertions(messages, insertions) {
     }
     return out;
 }
+/**
+ * Effort stated in the forwarded transcript before `messages[index]`: the
+ * last statement in transcript order, whether Claude Code's own (/effort) or
+ * a replayed insertion. Null when nothing was stated.
+ */
+export function statedEffortBefore(messages, insertions, index) {
+    const forwarded = applyInsertions(messages.slice(0, index), insertions.filter((i) => i.index <= index));
+    for (let i = forwarded.length - 1; i >= 0; i--) {
+        const e = forwarded[i].output_config?.effort;
+        if (forwarded[i].role === 'system' && isEffort(e))
+            return e;
+    }
+    return null;
+}
 /** Effort in force for the final message: last effort statement before it, else the top-level value. */
 export function effortInForce(messages, topLevel) {
     for (let i = messages.length - 2; i >= 0; i--) {
@@ -178,13 +192,7 @@ export function lastToolRound(messages) {
             continue;
         const r = results.get(b.id);
         const text = r ? (typeof r.content === 'string' ? r.content : stringifyResult(r.content)) : '';
-        batch.push({
-            tool: b.name ?? 'tool',
-            summary: describeToolInput(b.name ?? '', b.input),
-            runner: testRunner(b.name ?? '', b.input),
-            failed: r?.is_error === true || looksFailed(b.name ?? '', text),
-            result: text.slice(0, 600),
-        });
+        batch.push({ ...summarizeToolCall(b.name ?? '', b.input, text, r?.is_error === true, b.id), tool: b.name ?? 'tool' });
     }
     return { note, batch };
 }

@@ -62,6 +62,12 @@ export declare function effortMessage(effort: Effort): Message;
 export declare function isEffortStatement(m: unknown): m is Message;
 /** Replay insertions into Claude Code's messages (insertions sorted by index). */
 export declare function applyInsertions(messages: readonly Message[], insertions: readonly Insertion[]): Message[];
+/**
+ * Effort stated in the forwarded transcript before `messages[index]`: the
+ * last statement in transcript order, whether Claude Code's own (/effort) or
+ * a replayed insertion. Null when nothing was stated.
+ */
+export declare function statedEffortBefore(messages: readonly Message[], insertions: readonly Insertion[], index: number): Effort | null;
 /** Effort in force for the final message: last effort statement before it, else the top-level value. */
 export declare function effortInForce(messages: readonly Message[], topLevel: unknown): Effort;
 export declare function addBeta(header: string | undefined): string;

@@ -1,5 +1,5 @@
 import { query as sdkQuery, } from '@anthropic-ai/claude-agent-sdk';
-import { describeToolInput, looksFailed, stringifyResult, testRunner } from './describe.js';
+import { describeToolInput, stringifyResult, summarizeToolCall } from './describe.js';
 /** Push-driven AsyncIterable feeding user prompts into Claude Code's streaming input. */
 class InputQueue {
     items = [];
@@ -336,13 +336,9 @@ export class JevOpusSession {
         }
         const batch = input.tool_calls.map((c) => {
             const error = t.failures.get(c.tool_use_id);
-            return {
-                tool: c.tool_name,
-                summary: describeToolInput(c.tool_name, c.tool_input),
-                runner: testRunner(c.tool_name, c.tool_input),
-                failed: error !== undefined || looksFailed(c.tool_name, c.tool_response),
-                result: error ?? clip(stringifyResult(c.tool_response), 600),
-            };
+            return error !== undefined
+                ? summarizeToolCall(c.tool_name, c.tool_input, error, true, c.tool_use_id)
+                : summarizeToolCall(c.tool_name, c.tool_input, stringifyResult(c.tool_response), false, c.tool_use_id, c.tool_response);
         });
         t.turn += 1;
         t.consecutiveFailures = batch.some((c) => c.failed) ? t.consecutiveFailures + 1 : 0;
