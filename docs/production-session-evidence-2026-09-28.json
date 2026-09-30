@@ -1,0 +1,133 @@
+{
+  "session": "188f658e-59ae-443d-9a53-e6fd9273ccd3",
+  "scope": "Claude gateway traffic for one Proteus session; not the downstream Proteus evaluation model usage",
+  "sourceFiles": {
+    "transcript": "/Users/xk/.claude/projects/-Volumes-Xk-Drive-Code-Harness-Proteus-v2/188f658e-59ae-443d-9a53-e6fd9273ccd3.jsonl",
+    "trace": "/Users/xk/.config/jev-opus/traces/2026-09-27T17-05-28-125Z-82744.jsonl",
+    "journals": [
+      "/Users/xk/.config/jev-opus/journal/10c8760872917f6ed52b14d61dfd966472e92ad0.jsonl",
+      "/Users/xk/.config/jev-opus/journal/1b8a0e99ea6aac9066754ce073d049d2ca5aceba.jsonl",
+      "/Users/xk/.config/jev-opus/journal/5ce4fb6b0a38197db9f85b42093a41e83c062a6a.jsonl",
+      "/Users/xk/.config/jev-opus/journal/62e594696feb0e21b2923fb8db0d46ca6283f18f.jsonl",
+      "/Users/xk/.config/jev-opus/journal/a92fc7a22b9f23e744a49c7963c7e7dd5ac2ecce.jsonl",
+      "/Users/xk/.config/jev-opus/journal/b363c86c404cc5a4f3cb6ca731232d22376ce0e6.jsonl",
+      "/Users/xk/.config/jev-opus/journal/f68f47f1a46063f0c44bfdc5df6b3aed3391180b.jsonl"
+    ]
+  },
+  "observedAt": "2026-09-28",
+  "windowUtc": {
+    "first": "2026-09-27T17:06:46.156Z",
+    "last": "2026-09-28T06:12:51.160Z"
+  },
+  "counts": {
+    "decisions": 268,
+    "attempts": 268,
+    "matchedTranscriptResponseIds": 262,
+    "compactions": 6,
+    "efforts": {
+      "high": 181,
+      "medium": 58,
+      "low": 29
+    },
+    "sources": {
+      "jev": 74,
+      "local": 192,
+      "heuristic": 2
+    },
+    "attemptStatus": {
+      "completed": 268
+    },
+    "incompleteAttemptUsage": 0,
+    "holdDecisions": 117,
+    "confirmedFalseIssues": 7,
+    "decisionsContainingConfirmedFalseIssues": 61,
+    "highHoldDecisionsWhoseOnlyOpenReasoningIssuesAreConfirmedFalse": 17
+  },
+  "usage": {
+    "inputTokens": 14903,
+    "cacheReadInputTokens": 36056232,
+    "cacheCreationInputTokens": 869358,
+    "outputTokens": 203838
+  },
+  "cacheReadInputShare": 0.9760625555268037,
+  "evaluator": {
+    "queried": 76,
+    "totalLatencyMs": 74213,
+    "p50": 860,
+    "p95": 2071,
+    "max": 2504,
+    "errors": 2
+  },
+  "falseIssueEvidence": [
+    {
+      "transcriptToolLine": 114,
+      "transcriptResultLine": 116,
+      "decisionId": "b264fc02-c213-4951-bcdf-b028475c06f1",
+      "decisionAtUtc": "2026-09-27T17:10:10.918Z",
+      "issueFingerprint": "10656dbcdd83b543a2cf",
+      "persistedDecisionCount": 8,
+      "toolReportedError": false
+    },
+    {
+      "transcriptToolLine": 358,
+      "transcriptResultLine": 360,
+      "decisionId": "b63f5ebe-d019-40db-81f3-23be38603c78",
+      "decisionAtUtc": "2026-09-27T17:22:28.299Z",
+      "issueFingerprint": "1ae3631d9b824ea42b10",
+      "persistedDecisionCount": 12,
+      "toolReportedError": false
+    },
+    {
+      "transcriptToolLine": 388,
+      "transcriptResultLine": 390,
+      "decisionId": "49002f4a-75c7-4138-8776-1f8f4c45ac9e",
+      "decisionAtUtc": "2026-09-27T17:23:02.269Z",
+      "issueFingerprint": "7320225be33d653ce2e2",
+      "persistedDecisionCount": 7,
+      "toolReportedError": false
+    },
+    {
+      "transcriptToolLine": 802,
+      "transcriptResultLine": 804,
+      "decisionId": "27dd7624-dd77-4acd-bf0a-5b2cfa8f0f86",
+      "decisionAtUtc": "2026-09-28T01:58:26.752Z",
+      "issueFingerprint": "5061c7d919fa5750678f",
+      "persistedDecisionCount": 34,
+      "toolReportedError": false
+    },
+    {
+      "transcriptToolLine": 806,
+      "transcriptResultLine": 809,
+      "decisionId": "2d909b2e-f8d8-406d-a1f7-106ce990638b",
+      "decisionAtUtc": "2026-09-28T01:58:29.126Z",
+      "issueFingerprint": "9a7f4de6216a2a3dc403",
+      "persistedDecisionCount": 33,
+      "toolReportedError": false
+    },
+    {
+      "transcriptToolLine": 1037,
+      "transcriptResultLine": 1044,
+      "decisionId": "cf6b780d-8e22-404d-b970-4c41be1fd0cd",
+      "decisionAtUtc": "2026-09-28T02:21:51.548Z",
+      "issueFingerprint": "415e07e66cb18fea6dd7",
+      "persistedDecisionCount": 7,
+      "toolReportedError": false
+    },
+    {
+      "transcriptToolLine": 1047,
+      "transcriptResultLine": 1050,
+      "decisionId": "1bb6f9de-8a9e-45ee-8d83-f0d964365d5c",
+      "decisionAtUtc": "2026-09-28T02:22:08.591Z",
+      "issueFingerprint": "268bc536e0d3e92bcc41",
+      "persistedDecisionCount": 6,
+      "toolReportedError": false
+    }
+  ],
+  "limitations": [
+    "Protocol completion is not proof of task correctness.",
+    "Requested effort is not a measurement of actual reasoning.",
+    "No counterfactual effort run: avoid estimated savings claims.",
+    "Six journal response IDs do not appear in the main transcript and immediately precede six compactions; identifying them as compaction calls is an inference.",
+    "Running package version was not recorded in these decision events."
+  ]
+}
