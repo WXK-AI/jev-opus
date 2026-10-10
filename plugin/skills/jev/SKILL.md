@@ -11,12 +11,12 @@ jev-opus runs the task in a **separate** Claude Code process on `claude-opus-5-5
 
 ## Run it
 
-Pass the task through a quoted heredoc, so no quoting in the task can break the command. Run it from the user's project directory, **in the background** (tasks can take many minutes), and wait for it to finish:
+Pass the task through a quoted heredoc, so no quoting in the task can break the command. Make up a fresh delimiter for each run, `JEV_TASK_` plus 12 random hex characters, and check that it does not appear anywhere in the task text; a line equal to the delimiter would end the heredoc early and run the rest as shell. Run it from the user's project directory, **in the background** (tasks can take many minutes), and wait for it to finish:
 
 ```bash
-npx -y jev-opus@latest --permission-mode auto -w "$PWD" <<'JEV_TASK'
+npx -y jev-opus@latest --permission-mode auto -w "$PWD" <<'JEV_TASK_<random>'
 $ARGUMENTS
-JEV_TASK
+JEV_TASK_<random>
 ```
 
 If `$ARGUMENTS` is empty, ask the user what task to hand off instead of running anything.
