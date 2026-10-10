@@ -78,15 +78,7 @@ Hooks and commands that run on the user's machine.
 - Statusline: `process.execPath cli.js statusline`, with single-quote quoting (`launch.ts:143`). It reads Claude Code's JSON from stdin. `readStatus` validates the session ID with `^[\w-]+$` (`server.ts:703-704`).
 - Default settings: `--settings` defaults to `project,local` (`cli.ts:47`, README line 165). So `.claude/settings*.json` in the workspace, including any hooks defined there, is loaded into the Claude child. Claude Code's trust handling for SDK-driven runs is not visible in this code (see unclear items).
 - Permissions: default `acceptEdits` (`cli.ts:45`). `--yolo` sets `bypassPermissions` with `allowDangerouslySkipPermissions` (`session.ts:256`).
-- **Plugin skills.** `plugin/skills/jev/SKILL.md` has `allowed-tools: Bash` (line 5) and this command (lines 17-19):
-
-  ```
-  npx -y jev-opus@latest --permission-mode auto -w "$PWD" <<'JEV_TASK'
-  $ARGUMENTS
-  JEV_TASK
-  ```
-
-  The quoted heredoc stops `$` expansion in the body. A line inside `$ARGUMENTS` that is exactly `JEV_TASK` ends the heredoc, and any text after it runs as shell. I confirmed this with bash, using only `echo` in a scratch directory. The `@latest` tag is not pinned, so each run fetches whatever version npm currently serves.
+- **Plugin skills.** `plugin/skills/jev/SKILL.md` and `plugin/skills/jev-route/SKILL.md` declare or use Bash and pass `$ARGUMENTS` to `npx -y jev-opus@latest` through a quoted heredoc. The heredoc delimiter is `JEV_TASK_` plus random hex chosen per run, so task text cannot end the heredoc early. A way for task text to break out of that command and run as shell is critical. The `@latest` tag is not pinned, so each run fetches whatever version npm currently serves.
 - No `exec`, `eval`, or `new Function` is applied to model or Jev output anywhere in `src/`.
 
 Unclear from the code (not guessed):

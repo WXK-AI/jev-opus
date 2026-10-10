@@ -7,12 +7,12 @@ allowed-tools: Bash
 
 # Ask Jev for an effort decision
 
-This makes one Jev call and no Claude call:
+Replace `<random>` with 12 fresh random hex characters, and check that the delimiter does not appear in the task text; a line equal to it would end the heredoc early and run the rest as shell. This makes one Jev call and no Claude call:
 
 ```bash
-npx -y jev-opus@latest --route-only <<'JEV_TASK'
+npx -y jev-opus@latest --route-only <<'JEV_TASK_<random>'
 $ARGUMENTS
-JEV_TASK
+JEV_TASK_<random>
 ```
 
 Report the task type, difficulty, stakes, the chosen effort, and the reasons line. If `$ARGUMENTS` is empty, ask the user which task to classify.
