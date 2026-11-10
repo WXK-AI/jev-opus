@@ -246,7 +246,10 @@ test('gateway: other models, side requests without tools, and /v1/models', async
     assert.equal(jev.calls, 0);
 
     const models = (await (await fetch(`${base}/v1/models?limit=1000`, { headers: { [GATEWAY_AUTH_HEADER]: TEST_AUTH_TOKEN } })).json()) as { data: Array<{ id: string }> };
-    assert.deepEqual(models.data.map((m) => m.id), ['jev/claude-opus-5-5', 'claude-opus-5-5']);
+    assert.deepEqual(models.data.map((m) => m.id), ['jev/claude-opus-5-5', 'jev/claude-fable-5-2', 'claude-opus-5-5']);
+
+    await post(base, { model: 'jev/claude-fable-5-2', messages: [u('write a title for this chat')] });
+    assert.equal(up.seen.at(-1)!.body!.model, 'claude-fable-5-2');
   } finally {
     await gw.close();
     up.close();

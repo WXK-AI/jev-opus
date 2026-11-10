@@ -1,11 +1,13 @@
 import type { JevLike } from '../jev/client.ts';
 import type { Bounds } from '../router/policy.ts';
 import { JevGateway } from './server.ts';
-export declare const JEV_MODEL_ID = "jev/claude-opus-5-5";
+/** The model `jev-opus claude` selects and offers in /model; JEV_OPUS_MODEL=claude-fable-5-2 switches to Fable. */
+export declare const JEV_MODEL_ID: string;
+export declare const JEV_MODEL_NAME: string;
 export declare const STATUS_DIR: string;
 export declare const GATEWAY_LOG: string;
 export declare const JOURNAL_DIR: string;
-/** Env that makes Claude Code route through the gateway and list "Opus 5.5 · Jev" in /model. */
+/** Env that makes Claude Code route through the gateway and list "<model> · Jev" in /model. */
 export declare function gatewayClientEnv(baseUrl: string, authToken: string): Record<string, string>;
 /** Log a line to gateway.log without touching the terminal. */
 export declare function logToGateway(line: string): void;

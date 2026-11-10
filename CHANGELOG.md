@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fable 5.2 support: the gateway lists "Fable 5.2 · Jev" (`jev/claude-fable-5-2`) next to "Opus 5.5 · Jev" in `/v1/models`. `JEV_OPUS_MODEL=claude-fable-5-2` makes `jev-opus claude` select it and offer it in /model. Opus 5.5 stays the default.
+
 ## 0.5.0-abby.1 - 2026-10-08
 
 - `jev-opus claude` sets `ENABLE_TOOL_SEARCH=true`: Claude Code turns tool search off behind a non-Anthropic `ANTHROPIC_BASE_URL`, so every MCP schema was loaded into each prompt (~47 % of the context at session start). A value already in the environment wins.

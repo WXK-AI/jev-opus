@@ -16,7 +16,7 @@ import { EffortDisplay, displayMode } from './display.ts';
 import { Journal, type JournalLine, type JournalRecord, type JournalStatus } from './journal.ts';
 import {
   addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt,
-  lastToolRound, prefixHashes, requestFingerprint, statedEffortBefore, stripJevModel, userText, type Insertion, type Message,
+  lastToolRound, prefixHashes, requestFingerprint, statedEffortBefore, stripJevModel, userText, JEV_MODEL_PREFIX, JEV_MODELS, type Insertion, type Message,
 } from './transcript.ts';
 
 /**
@@ -302,7 +302,7 @@ export class JevGateway {
     if (pathname === '/v1/models' && req.method === 'GET' && up.ok) {
       const data = (await up.json()) as { data?: Array<Record<string, unknown>> };
       if (Array.isArray(data.data)) {
-        data.data.unshift({ id: 'jev/claude-opus-5-5', display_name: 'Opus 5.5 · Jev', description: 'Opus 5.5 with effort re-picked every step by Jev', type: 'model' });
+        data.data.unshift(...JEV_MODELS.map((m) => ({ id: `${JEV_MODEL_PREFIX}${m.id}`, display_name: `${m.name} · Jev`, description: `${m.name} with effort re-picked every step by Jev`, type: 'model' })));
       }
       res.writeHead(up.status, { ...outHeaders, 'content-type': 'application/json' });
       res.end(JSON.stringify(data));

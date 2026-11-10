@@ -11,6 +11,12 @@ import type { ToolCallSummary } from '../router/types.ts';
  * keeps both the prompt cache and preserved-thinking blocks valid.
  */
 export declare const JEV_MODEL_PREFIX = "jev/";
+/** Upstream models listed as "jev/<id>" in /model and /v1/models; the first is the default. */
+export declare const JEV_MODELS: ReadonlyArray<{
+    id: string;
+    name: string;
+}>;
+export declare function jevModelName(model: string): string;
 export declare const PER_MESSAGE_EFFORT_BETAS: string[];
 type Json = Record<string, unknown>;
 export type Message = {
