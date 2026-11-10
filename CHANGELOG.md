@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fable 5.2, Sonnet 5.5 and Haiku 5.5: the gateway lists them as "<model> · Jev" (`jev/claude-fable-5-2`, `jev/claude-sonnet-5-5`, `jev/claude-haiku-5-5`) next to "Opus 5.5 · Jev" in `/v1/models`, and `JEV_OPUS_MODEL` makes `jev-opus claude` select one of them in /model. All four accept `output_config.effort` low…max. Opus 5.5 stays the default.
+
 ## 0.5.0-abby.1 - 2026-10-08
 
 - `jev-opus claude` sets `ENABLE_TOOL_SEARCH=true`: Claude Code turns tool search off behind a non-Anthropic `ANTHROPIC_BASE_URL`, so every MCP schema was loaded into each prompt (~47 % of the context at session start). A value already in the environment wins.

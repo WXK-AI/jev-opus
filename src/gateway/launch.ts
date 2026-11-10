@@ -11,19 +11,23 @@ import { GATEWAY_AUTH_HEADER, JevGateway, readStatus } from './server.ts';
 import { inlineEffortSettings } from './display.ts';
 import { withGatewaySettings, withNarration } from './settings.ts';
 
-export const JEV_MODEL_ID = 'jev/claude-opus-5-5';
+import { JEV_MODEL_PREFIX, jevModelName } from './transcript.ts';
+
+/** The model `jev-opus claude` selects and offers in /model; JEV_OPUS_MODEL=claude-fable-5-2 switches to Fable. */
+export const JEV_MODEL_ID = `${JEV_MODEL_PREFIX}${config.model}`;
+export const JEV_MODEL_NAME = jevModelName(config.model);
 export const STATUS_DIR = path.join(CONFIG_DIR, 'status');
 export const GATEWAY_LOG = path.join(CONFIG_DIR, 'gateway.log');
 export const JOURNAL_DIR = path.join(CONFIG_DIR, 'journal');
 
-/** Env that makes Claude Code route through the gateway and list "Opus 5.5 · Jev" in /model. */
+/** Env that makes Claude Code route through the gateway and list "<model> · Jev" in /model. */
 export function gatewayClientEnv(baseUrl: string, authToken: string): Record<string, string> {
   return {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_CUSTOM_HEADERS: `${GATEWAY_AUTH_HEADER}: ${authToken}`,
     ANTHROPIC_CUSTOM_MODEL_OPTION: JEV_MODEL_ID,
-    ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: 'Opus 5.5 · Jev',
-    ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'Opus 5.5 with effort re-picked every step by Jev (low/medium/high), cache-safe',
+    ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: `${JEV_MODEL_NAME} · Jev`,
+    ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: `${JEV_MODEL_NAME} with effort re-picked every step by Jev (low/medium/high), cache-safe`,
     // Claude Code turns tool search off behind a non-Anthropic base URL, loading every MCP schema into each prompt.
     ENABLE_TOOL_SEARCH: 'true',
   };

@@ -13,11 +13,11 @@ import { EffortRouter } from './router/router.js';
 // Node's Happy Eyeballs gives each address 250ms to connect; on slower links every
 // upstream fetch fails with ETIMEDOUT even though curl connects fine.
 net.setDefaultAutoSelectFamilyAttemptTimeout(Number(process.env.JEV_OPUS_CONNECT_ATTEMPT_MS) || 2000);
-import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, launchClaude, logToGateway, resolveClaude, statusline } from './gateway/launch.js';
+import { createGateway, GATEWAY_LOG, gatewayClientEnv, JEV_MODEL_ID, JEV_MODEL_NAME, launchClaude, logToGateway, resolveClaude, statusline } from './gateway/launch.js';
 import { inlineEffortSettings } from './gateway/display.js';
 import { createTrace } from './trace.js';
 import { c, fmtEffort, formatDecision, formatReport, Terminal } from './ui.js';
-const HELP = `jev-opus — Claude Opus 5.5 (via Claude Code) with effort steered turn-by-turn by Jev
+const HELP = `jev-opus — Claude Opus 5.5, Fable 5.2, Sonnet 5.5 or Haiku 5.5 (via Claude Code) with effort steered turn-by-turn by Jev
 
 Usage:
   jev-opus "prompt"            run one prompt, then exit
@@ -26,7 +26,7 @@ Usage:
   jev-opus doctor              check Claude Code, credentials, and the Jev API
   jev-opus init                create ${CONFIG_ENV_FILE} (asks for your Jev key)
 
-  jev-opus claude [args…]      your normal interactive Claude Code, with "Opus 5.5 · Jev" selected in /model
+  jev-opus claude [args…]      your normal interactive Claude Code, with "${JEV_MODEL_NAME} · Jev" selected in /model
   jev-opus gateway [--port n]  run the Jev gateway for VS Code / JetBrains / Agent SDK (ANTHROPIC_BASE_URL)
   jev-opus audit [D-id] [--json]  inspect decisions, attempts, usage, and visual annotations
   jev-opus audit --holds       only decisions with open failures, and why each one stays open
@@ -225,7 +225,7 @@ async function gateway(jev, bounds, port) {
     console.log(c.dim('Point Claude Code at it (CLI shell, VS Code "claudeCode.environmentVariables", Agent SDK env):'));
     for (const [k, v] of Object.entries(env))
         console.log(c.dim(`  ${k}=${JSON.stringify(v)}`));
-    console.log(c.dim(`then pick "Opus 5.5 · Jev" in /model (or --model ${JEV_MODEL_ID}). Ctrl-C to stop.`));
+    console.log(c.dim(`then pick "${JEV_MODEL_NAME} · Jev" in /model (or --model ${JEV_MODEL_ID}). Ctrl-C to stop.`));
     console.log(c.dim('For inline effort badges, merge these session hooks into your Claude Code settings (valid while this gateway runs):'));
     console.log(JSON.stringify(inlineEffortSettings(url + gw.displayHookPath, { toolNotices: process.env.JEV_OPUS_TOOL_NOTICES !== '0' }), null, 2));
     await new Promise((resolve) => process.once('SIGINT', resolve));
@@ -262,7 +262,7 @@ async function init() {
         '# ANTHROPIC_API_KEY=',
         '# CLAUDE_CODE_OAUTH_TOKEN=',
         '',
-        '# JEV_OPUS_MODEL=claude-opus-5-5',
+        '# JEV_OPUS_MODEL=claude-opus-5-5   # or claude-fable-5-2, claude-sonnet-5-5, claude-haiku-5-5',
         '# JEV_OPUS_MIN_EFFORT=low',
         '# JEV_OPUS_MAX_EFFORT=high',
         '# JEV_OPUS_MODE=shadow   # `jev-opus claude` asks Jev and logs, but forwards requests unchanged',

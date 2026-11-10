@@ -9,7 +9,7 @@ This is the [abby-inc](https://github.com/abby-inc/jev-opus) fork of [WXK-AI/jev
 3. **Ceiling `high`.** `xhigh` and `max` are reachable only with an explicit `JEV_OPUS_MAX_EFFORT`.
 4. **Pinned skills.** The plugin skills run your local `jev-opus`, else an exact pinned version, never `npx jev-opus@latest`.
 
-Your own `--model` is never replaced and all other CLI arguments go to Claude Code. Without `--model`, `jev-opus claude` selects the "Opus 5.5 · Jev" model; with another model there is no routing (shadow mode still observes it).
+Your own `--model` is never replaced and all other CLI arguments go to Claude Code. Without `--model`, `jev-opus claude` selects the "Opus 5.5 · Jev" model (`JEV_OPUS_MODEL` can select `claude-fable-5-2`, `claude-sonnet-5-5` or `claude-haiku-5-5` instead; all four are listed by the gateway's `/v1/models`); with another model there is no routing (shadow mode still observes it).
 
 Install from source (no npm release of the fork yet):
 

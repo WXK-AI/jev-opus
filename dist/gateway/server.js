@@ -9,7 +9,7 @@ import { isEffort } from '../effort.js';
 import { ResponseTelemetry } from './telemetry.js';
 import { EffortDisplay, displayMode } from './display.js';
 import { Journal } from './journal.js';
-import { addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt, lastToolRound, prefixHashes, requestFingerprint, statedEffortBefore, stripJevModel, userText, } from './transcript.js';
+import { addBeta, applyInsertions, clientEffort, hasToolResults, isJevModel, lastIndexOfRole, lastPrompt, lastToolRound, prefixHashes, requestFingerprint, statedEffortBefore, stripJevModel, userText, JEV_MODEL_PREFIX, JEV_MODELS, } from './transcript.js';
 const HOP_BY_HOP = new Set(['host', 'connection', 'content-length', 'accept-encoding', 'transfer-encoding', 'keep-alive', 'proxy-connection', 'upgrade']);
 const DROP_RESPONSE = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive']);
 const POLICY_VERSION = `gateway.v1+${TASK_SET_VERSION}+${STEP_SET_VERSION}`;
@@ -220,7 +220,7 @@ export class JevGateway {
         if (pathname === '/v1/models' && req.method === 'GET' && up.ok) {
             const data = (await up.json());
             if (Array.isArray(data.data)) {
-                data.data.unshift({ id: 'jev/claude-opus-5-5', display_name: 'Opus 5.5 · Jev', description: 'Opus 5.5 with effort re-picked every step by Jev', type: 'model' });
+                data.data.unshift(...JEV_MODELS.map((m) => ({ id: `${JEV_MODEL_PREFIX}${m.id}`, display_name: `${m.name} · Jev`, description: `${m.name} with effort re-picked every step by Jev`, type: 'model' })));
             }
             res.writeHead(up.status, { ...outHeaders, 'content-type': 'application/json' });
             res.end(JSON.stringify(data));

@@ -15,6 +15,18 @@ import type { ToolCallSummary } from '../router/types.ts';
  */
 
 export const JEV_MODEL_PREFIX = 'jev/';
+
+/** Upstream models listed as "jev/<id>" in /model and /v1/models; the first is the default. */
+export const JEV_MODELS: ReadonlyArray<{ id: string; name: string }> = [
+  { id: 'claude-opus-5-5', name: 'Opus 5.5' },
+  { id: 'claude-fable-5-2', name: 'Fable 5.2' },
+  { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5' },
+  { id: 'claude-haiku-5-5', name: 'Haiku 5.5' },
+];
+
+export function jevModelName(model: string): string {
+  return JEV_MODELS.find((m) => m.id === model)?.name ?? model;
+}
 export const PER_MESSAGE_EFFORT_BETAS = ['mid-conversation-output-config-2026-07-01', 'per-turn-control-2026-07-01', 'mid-conversation-effort-2026-08-01'];
 
 type Json = Record<string, unknown>;
