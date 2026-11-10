@@ -28,6 +28,10 @@ export function gatewayClientEnv(baseUrl: string, authToken: string): Record<str
     ANTHROPIC_CUSTOM_MODEL_OPTION: JEV_MODEL_ID,
     ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: `${JEV_MODEL_NAME} · Jev`,
     ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: `${JEV_MODEL_NAME} with effort re-picked every step by Jev (low/medium/high), cache-safe`,
+    // Behind a non-Anthropic base URL Claude Code falls back to its built-in alias map (fable → 5.1); pin each family.
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5-5',
+    ANTHROPIC_DEFAULT_FABLE_MODEL: 'claude-fable-5-2',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-5-5',
     // Claude Code turns tool search off behind a non-Anthropic base URL, loading every MCP schema into each prompt.
     ENABLE_TOOL_SEARCH: 'true',
   };

@@ -15,6 +15,7 @@ test('Claude Code gateway environment carries the local token as a custom header
   assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:47821');
   assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, `${GATEWAY_AUTH_HEADER}: ${TEST_AUTH_TOKEN}`);
   assert.equal(env.ENABLE_TOOL_SEARCH, 'true');
+  assert.equal(env.ANTHROPIC_DEFAULT_FABLE_MODEL, 'claude-fable-5-2');
 });
 
 test('each gateway gets a strong token and rejects weak overrides', () => {
