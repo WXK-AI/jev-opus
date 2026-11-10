@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fable 5.2 support: the gateway lists "Fable 5.2 · Jev" (`jev/claude-fable-5-2`) next to "Opus 5.5 · Jev" in `/v1/models`. `JEV_OPUS_MODEL=claude-fable-5-2` makes `jev-opus claude` select it and offer it in /model. Opus 5.5 stays the default.
+- Fable 5.2, Sonnet 5.5 and Haiku 5.5: the gateway lists them as "<model> · Jev" (`jev/claude-fable-5-2`, `jev/claude-sonnet-5-5`, `jev/claude-haiku-5-5`) next to "Opus 5.5 · Jev" in `/v1/models`, and `JEV_OPUS_MODEL` makes `jev-opus claude` select one of them in /model. All four accept `output_config.effort` low…max. Opus 5.5 stays the default.
 
 ## 0.5.0-abby.1 - 2026-10-08
 

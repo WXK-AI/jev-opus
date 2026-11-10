@@ -20,7 +20,7 @@ import { inlineEffortSettings } from './gateway/display.ts';
 import { createTrace } from './trace.ts';
 import { c, fmtEffort, formatDecision, formatReport, Terminal } from './ui.ts';
 
-const HELP = `jev-opus — Claude Opus 5.5 or Fable 5.2 (via Claude Code) with effort steered turn-by-turn by Jev
+const HELP = `jev-opus — Claude Opus 5.5, Fable 5.2, Sonnet 5.5 or Haiku 5.5 (via Claude Code) with effort steered turn-by-turn by Jev
 
 Usage:
   jev-opus "prompt"            run one prompt, then exit
@@ -264,7 +264,7 @@ async function init(): Promise<string> {
     '# ANTHROPIC_API_KEY=',
     '# CLAUDE_CODE_OAUTH_TOKEN=',
     '',
-    '# JEV_OPUS_MODEL=claude-opus-5-5   # or claude-fable-5-2',
+    '# JEV_OPUS_MODEL=claude-opus-5-5   # or claude-fable-5-2, claude-sonnet-5-5, claude-haiku-5-5',
     '# JEV_OPUS_MIN_EFFORT=low',
     '# JEV_OPUS_MAX_EFFORT=high',
     '# JEV_OPUS_MODE=shadow   # `jev-opus claude` asks Jev and logs, but forwards requests unchanged',
